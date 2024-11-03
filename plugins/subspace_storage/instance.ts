@@ -2,14 +2,17 @@ import * as lib from "@clusterio/lib";
 import { BaseInstancePlugin } from "@clusterio/host";
 
 import {
-	PlaceEvent,
-	RemoveRequest,
+	PlaceItemsEvent as AddItemsEvent,
+	RetrieveItemsRequest as RemoveItemsRequest,
 	GetStorageRequest,
 	UpdateStorageEvent,
 	Item,
+	Entity,
+	PlaceEntitiesEvent as BroadcastEndpointsEvent,
 } from "./messages";
 
-type IpcItems = [string, number][];
+type IpcEndpoints = [string, number, number, string][];
+type IpcItems = [string, number, number, string, number][];
 
 export class InstancePlugin extends BaseInstancePlugin {
 	pendingTasks!: Set<any>;
@@ -21,19 +24,23 @@ export class InstancePlugin extends BaseInstancePlugin {
 
 	async init() {
 		this.pendingTasks = new Set();
-		this.instance.server.on("ipc-subspace_storage:output", (output: IpcItems) => {
-			this.provideItems(output).catch(err => this.unexpectedError(err));
+		this.instance.server.on("ipc-subspace_storage:broadcast_endpoints", (output: IpcEndpoints) => {
+			this.broadcastEndpoints(output).catch(err => this.unexpectedError(err));
 		});
-		this.instance.server.on("ipc-subspace_storage:orders", (orders: IpcItems) => {
+		this.instance.server.on("ipc-subspace_storage:send_items", (items: IpcItems) => {
+			this.sendItems(items).catch(err => this.unexpectedError(err));
+		});
+		this.instance.server.on("ipc-subspace_storage:request_items", (items: IpcItems) => {
 			if (this.instance.status !== "running" || !this.host.connected) {
 				return;
 			}
 
-			let task = this.requestItems(orders).catch(err => this.unexpectedError(err));
+			let task = this.requestItems(items).catch(err => this.unexpectedError(err));
 			this.pendingTasks.add(task);
 			task.finally(() => { this.pendingTasks.delete(task); });
 		});
 
+		this.instance.handle(BroadcastEndpointsEvent, this.handleBroadcastEndpointsEvent.bind(this));
 		this.instance.handle(UpdateStorageEvent, this.handleUpdateStorageEvent.bind(this));
 	}
 
@@ -48,9 +55,7 @@ export class InstancePlugin extends BaseInstancePlugin {
 		}, 5000);
 
 		let items = await this.instance.sendTo("controller", new GetStorageRequest());
-		// TODO Diff with dump of invdata produce minimal command to sync
-		let itemsJson = lib.escapeString(JSON.stringify(items));
-		await this.sendRcon(`/sc __subspace_storage__ UpdateInvData("${itemsJson}", true)`, true);
+		await this.sendRcon(`/sc __subspace_storage__ SetStorage("${lib.escapeString(JSON.stringify(items))}")`, true);
 	}
 
 	async onStop() {
@@ -62,11 +67,25 @@ export class InstancePlugin extends BaseInstancePlugin {
 		clearInterval(this.pingId);
 	}
 
-	// provide items --------------------------------------------------------------
-	async provideItems(items: IpcItems) {
+	async broadcastEndpoints(entities: IpcEndpoints) {
 		if (!this.host.connector.hasSession) {
-			// For now the items are voided if the controller connection is
-			// down, which is no different from the previous behaviour.
+			if (this.instance.config.get("subspace_storage.log_item_transfers")) {
+				this.logger.verbose("Ignored the following entities:");
+				this.logger.verbose(JSON.stringify(entities));
+			}
+			return;
+		}
+
+		this.instance.sendTo("controller", new BroadcastEndpointsEvent(entities.map(item => new Entity(...item))));
+
+		if (this.instance.config.get("subspace_storage.log_item_transfers")) {
+			this.logger.verbose("Exported the following entities to controller:");
+			this.logger.verbose(JSON.stringify(entities));
+		}
+	}
+
+	async sendItems(items: IpcItems) {
+		if (!this.host.connector.hasSession) {
 			if (this.instance.config.get("subspace_storage.log_item_transfers")) {
 				this.logger.verbose("Voided the following items:");
 				this.logger.verbose(JSON.stringify(items));
@@ -74,47 +93,45 @@ export class InstancePlugin extends BaseInstancePlugin {
 			return;
 		}
 
-
-		const fromIpcItems = items.map(item => new Item(item[0], item[1]));
-		this.instance.sendTo("controller", new PlaceEvent(fromIpcItems));
+		this.instance.sendTo("controller", new AddItemsEvent(items.map(item => new Item(...item))));
 
 		if (this.instance.config.get("subspace_storage.log_item_transfers")) {
-			this.logger.verbose("Exported the following to controller:");
+			this.logger.verbose("Exported the following items to controller:");
 			this.logger.verbose(JSON.stringify(items));
 		}
 	}
 
-	// request items --------------------------------------------------------------
-	async requestItems(requestItems: IpcItems) {
-		// Request the items all at once
-		let fromIpcItems = requestItems.map(item => new Item(item[0], item[1]));
-		let items = await this.instance.sendTo("controller", new RemoveRequest(fromIpcItems));
+	async requestItems(requests: IpcItems) {
+		let items = await this.instance.sendTo("controller", new RemoveItemsRequest(requests.map(item => new Item(...item))));
 
 		if (!items.length) {
 			return;
 		}
 
 		if (this.instance.config.get("subspace_storage.log_item_transfers")) {
-			this.logger.verbose("Imported following from controller:");
+			this.logger.verbose("Imported following items from controller:");
 			this.logger.verbose(JSON.stringify(items));
 		}
 
-		let itemsJson = lib.escapeString(JSON.stringify(items));
-		await this.sendRcon(`/sc __subspace_storage__ Import("${itemsJson}")`, true);
+		await this.sendRcon(`/sc __subspace_storage__ ReceiveItems("${lib.escapeString(JSON.stringify(items))}")`, true);
 	}
 
-	// combinator signals ---------------------------------------------------------
-	async handleUpdateStorageEvent(event: UpdateStorageEvent) {
+	async handleBroadcastEndpointsEvent({ entities }: BroadcastEndpointsEvent) {
 		if (this.instance.status !== "running") {
 			return;
 		}
-		let items = event.items;
 
-		// XXX this should be moved to instance/clusterio api
-		items.push(new Item("signal-unixtime", Math.floor(Date.now()/1000)));
+		let task = this.sendRcon(`/sc __subspace_storage__ ReceiveEndpoints("${lib.escapeString(JSON.stringify(entities))}")`, true);
+		this.pendingTasks.add(task);
+		await task.finally(() => { this.pendingTasks.delete(task); });
+	}
 
-		let itemsJson = lib.escapeString(JSON.stringify(items));
-		let task = this.sendRcon(`/sc __subspace_storage__ UpdateInvData("${itemsJson}")`, true);
+	async handleUpdateStorageEvent({ items }: UpdateStorageEvent) {
+		if (this.instance.status !== "running") {
+			return;
+		}
+
+		let task = this.sendRcon(`/sc __subspace_storage__ UpdateStorage("${lib.escapeString(JSON.stringify(items))}")`, true);
 		this.pendingTasks.add(task);
 		await task.finally(() => { this.pendingTasks.delete(task); });
 	}

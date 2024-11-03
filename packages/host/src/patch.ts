@@ -206,6 +206,7 @@ export class PatchInfo {
 const knownScenarios: Record<string, lib.ModuleInfo> = {
 	// First seen in 0.17.63
 	"4e866186ebe297f1038fd325b09df1a1f5e2fdd1": new lib.ModuleInfo("freeplay", "0.17.63", ["freeplay", "silo-script"]),
+	"ec564be47009e97926cee4da3177c0fa2d3d5a6e": new lib.ModuleInfo("pvp", "0.17.63", ["pvp"]),
 };
 
 /**

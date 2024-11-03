@@ -9,6 +9,7 @@ export class ContributionEvent {
 	static plugin = "research_sync" as const;
 
 	constructor(
+		public force: string,
 		public name: string,
 		public level: number,
 		public contribution: number
@@ -16,19 +17,21 @@ export class ContributionEvent {
 	}
 
 	static jsonSchema = Type.Object({
+		"force": Type.String(),
 		"name": Type.String(),
 		"level": Type.Integer(),
 		"contribution": Type.Number(),
 	});
 
-	static fromJSON(json: Static<typeof ContributionEvent.jsonSchema>): ContributionEvent {
-		return new this(json.name, json.level, json.contribution);
+	static fromJSON({ force, name, level, contribution }: Static<typeof ContributionEvent.jsonSchema>): ContributionEvent {
+		return new this(force, name, level, contribution);
 	}
 }
 
 
 export class TechnologyProgress {
 	constructor(
+		public force: string,
 		public name: string,
 		public level: number,
 		public progress: number | null,
@@ -36,6 +39,7 @@ export class TechnologyProgress {
 	}
 
 	static jsonSchema = Type.Object({
+		"force": Type.String(),
 		"name": Type.String(),
 		"level": Type.Integer(),
 		"progress": Type.Number(),
@@ -73,23 +77,26 @@ export class FinishedEvent {
 	static plugin = "research_sync" as const;
 
 	constructor(
+		public force: string,
 		public name: string,
 		public level: number,
 	) {
 	}
 
 	static jsonSchema = Type.Object({
+		"force": Type.String(),
 		"name": Type.String(),
 		"level": Type.Integer(),
 	});
 
-	static fromJSON(json: Static<typeof FinishedEvent.jsonSchema>): FinishedEvent {
-		return new this(json.name, json.level);
+	static fromJSON({ force, name, level }: Static<typeof FinishedEvent.jsonSchema>): FinishedEvent {
+		return new this(force, name, level);
 	}
 }
 
 export class TechnologySync {
 	constructor(
+		public force: string,
 		public name: string,
 		public level: number,
 		public progress: number | null,
@@ -99,17 +106,18 @@ export class TechnologySync {
 
 	static jsonSchema = Type.Tuple([
 		Type.String(),
+		Type.String(),
 		Type.Integer(),
 		Type.Union([Type.Number(), Type.Null()]),
 		Type.Boolean(),
 	]);
 
 	toJSON() {
-		return [this.name, this.level, this.progress, this.researched];
+		return [this.force, this.name, this.level, this.progress, this.researched];
 	}
 
 	static fromJSON(json: Static<typeof TechnologySync.jsonSchema>): TechnologySync {
-		return new this(json[0], json[1], json[2], json[3]);
+		return new this(...json);
 	}
 }
 

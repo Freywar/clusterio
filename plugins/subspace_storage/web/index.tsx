@@ -1,17 +1,16 @@
 import React, { useContext, useEffect, useState } from "react";
 import { Input, Table, Typography } from "antd";
 
-import * as lib from "@clusterio/lib";
 import {
 	BaseWebPlugin, PageLayout, PageHeader, Control, ControlContext,
 	notifyErrorHandler, useItemMetadata, useLocale,
 } from "@clusterio/web_ui";
-import { GetStorageRequest, Item, SetStorageSubscriptionRequest, UpdateStorageEvent } from "../messages";
+import { StorageMap } from "../data";
+import { GetStorageRequest, Item, SubscribeOnStorageRequest, UpdateStorageEvent } from "../messages";
 
 import "./style.css";
 
 const { Paragraph } = Typography;
-
 
 function useStorage(control: Control) {
 	let plugin = control.plugins.get("subspace_storage") as WebPlugin;
@@ -23,41 +22,39 @@ function useStorage(control: Control) {
 		}
 
 		plugin.onUpdate(update);
-		return () => {
-			plugin.offUpdate(update);
-		};
+		return () => plugin.offUpdate(update);
 	}, []);
+
 	return storage;
 }
+
+type ItemFilter = ([force, x, y, name, count]: [string, number, number, string, number]) => boolean;
 
 function StoragePage() {
 	let control = useContext(ControlContext);
 	let locale = useLocale();
 	let itemMetadata = useItemMetadata();
 	let storage = useStorage(control);
-	type ItemFilter = ([name, count]: [string, number]) => boolean;
 	let [filter, setFilter] = useState<null | ItemFilter>(null);
 
-	function getLocaleName(itemName: string) {
-		let localeName = itemName;
-		let meta = itemMetadata.get(itemName);
-		if (meta && meta.localised_name) {
+	function getLocaleName(name: string) {
+		let meta = itemMetadata.get(name);
+		if (meta?.localised_name) {
 			// TODO: implement the locale to name conversion.
-			localeName = locale.get(meta.localised_name[0])!;
+			return locale.get(meta.localised_name[0])!;
 		} else {
 			for (let section of ["item-name", "entity-name", "fluid-name", "equipment-name"]) {
-				let name = locale.get(`${section}.${itemName}`);
-				if (name) {
-					localeName = name;
-					break;
+				let sectionedName = locale.get(`${section}.${name}`);
+				if (sectionedName) {
+					return sectionedName;
 				}
 			}
 		}
 
-		return localeName;
+		return name;
 	}
 
-	let numberFormat = new Intl.NumberFormat("en-US");
+	let NumberFormat = new Intl.NumberFormat("en-US");
 
 	return <PageLayout nav={[{ name: "Storage" }]}>
 		<PageHeader title="Storage" />
@@ -70,56 +67,69 @@ function StoragePage() {
 						setFilter(null);
 						return;
 					}
-					search = search.replace(/(^| )(\w)/g, "$1\\b$2");
-					search = search.replace(/ +/g, ".*");
-					let filterExpr = new RegExp(search, "i");
-					setFilter(() => ((item: [string, number]) => {
-						let name = getLocaleName(item[0]);
-						return filterExpr.test(name) || filterExpr.test(item[0]);
-					}));
+					let filterExpr = new RegExp(search.replace(/(^| )(\w)/g, "$1\\b$2").replace(/ +/g, ".*"), "i");
+					setFilter(() => (([, , , name, count]: [string, number, number, string, number]) =>
+						filterExpr.test(name) || filterExpr.test(getLocaleName(name))));
 				}}
 			/>
 		</Paragraph>
 		<Table
 			columns={[
 				{
-					title: "Resource",
-					key: "resource",
-					sorter: (a, b) => {
-						let aName = getLocaleName(a[0]);
-						let bName = getLocaleName(b[0]);
-						if (aName < bName) { return -1; }
-						if (aName > bName) { return 1; }
+					title: "Force",
+					key: "force",
+					sorter: ([af], [bf]) => {
+						if (af < bf) { return -1; }
+						if (af > bf) { return 1; }
 						return 0;
 					},
-					render: (_, item) => {
-						let localeName = getLocaleName(item[0]);
-						let hasMeta = itemMetadata.get(item[0]);
-
-						return <>
-							<span className={`factorio-icon item-${hasMeta ? item[0] : "unknown-item"}`}/>
-							{localeName}
-						</>;
+					render: (_, [force]) => <>{force ?? "player"}</>
+				},
+				{
+					title: "Chunk",
+					key: "chunk",
+					sorter: ([, ax, ay], [, bx, by]) => {
+						if (ax < bx) { return -1; }
+						if (ax > bx) { return 1; }
+						if (ay < by) { return -1; }
+						if (ay > by) { return 1; }
+						return 0;
 					},
+					render: (_, [, x, y]) => <>{x},{y}</>
+				},
+				{
+					title: "Resource",
+					key: "resource",
+					sorter: ([, , , an], [, , , bn]) => {
+						let aln = getLocaleName(an);
+						let bln = getLocaleName(bn);
+						if (aln < bln) { return -1; }
+						if (aln > bln) { return 1; }
+						return 0;
+					},
+					render: (_, [, , , name]) => <>
+						<span className={`factorio-icon item-${itemMetadata.get(name) ? name : "unknown-item"}`} />
+						{getLocaleName(name)}
+					</>,
 				},
 				{
 					title: "Quantity",
 					key: "quantity",
 					align: "right",
 					defaultSortOrder: "descend",
-					sorter: (a, b) => a[1] - b[1],
-					render: (_, item) => numberFormat.format(item[1]),
+					sorter: ([,,,,ac], [,,,,bc]) => ac - bc,
+					render: (_, [,,,,count]) => NumberFormat.format(count),
 				},
 			]}
 			dataSource={filter ? storage.filter(filter) : storage}
-			rowKey={item => item[0]}
+			rowKey={([f, x, y, n]) => `${f}/${x}/${y}/${n}`}
 			pagination={false}
 		/>
 	</PageLayout>;
 }
 
 export class WebPlugin extends BaseWebPlugin {
-	storage = new Map<string, number>();
+	storage = new StorageMap();
 	callbacks: (() => void)[] = [];
 
 	async init() {
@@ -128,7 +138,7 @@ export class WebPlugin extends BaseWebPlugin {
 				path: "/storage",
 				sidebarName: "Storage",
 				permission: "subspace_storage.storage.view",
-				content: <StoragePage/>,
+				content: <StoragePage />,
 			},
 		];
 		this.control.handle(UpdateStorageEvent, this.handleUpdateStorageEvent.bind(this));
@@ -146,7 +156,7 @@ export class WebPlugin extends BaseWebPlugin {
 
 	onUpdate(callback: () => void) {
 		this.callbacks.push(callback);
-		if (this.callbacks.length) {
+		if (!this.callbacks.length) {
 			this.updateSubscription();
 		}
 	}
@@ -163,32 +173,31 @@ export class WebPlugin extends BaseWebPlugin {
 		}
 	}
 
-	updateStorage(items: Item[]) {
-		for (let item of items) {
-			this.storage.set(item.name, item.count);
-		}
-		for (let callback of this.callbacks) {
-			callback();
-		}
-	}
-
 	updateSubscription() {
 		if (!this.control.connector.connected) {
 			return;
 		}
 
-		this.control.send(
-			new SetStorageSubscriptionRequest(Boolean(this.callbacks.length))
-		).catch(notifyErrorHandler("Error subscribing to storage"));
+		this.control
+			.send(new SubscribeOnStorageRequest(!!this.callbacks.length))
+			.catch(notifyErrorHandler("Error subscribing to storage"));
 
 		if (this.callbacks.length) {
-			this.control!.send(new GetStorageRequest()).then(
-				items => {
-					this.updateStorage(items);
-				}
-			).catch(notifyErrorHandler("Error updating storage"));
+			this.control!
+				.send(new GetStorageRequest())
+				.then(items => this.updateStorage(items))
+				.catch(notifyErrorHandler("Error updating storage"));
 		} else {
 			this.storage.clear();
+		}
+	}
+
+	updateStorage(items: Item[]) {
+		for (let { force, x, y, name, count } of items) {
+			this.storage.set(force, x, y, name, count);
+		}
+		for (let callback of this.callbacks) {
+			callback();
 		}
 	}
 }

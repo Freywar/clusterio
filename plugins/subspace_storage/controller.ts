@@ -9,15 +9,8 @@ const { Counter, Gauge } = lib;
 import * as routes from "./routes";
 import * as dole from "./dole";
 
-import {
-	Item,
-	PlaceEvent,
-	RemoveRequest,
-	GetStorageRequest,
-	UpdateStorageEvent,
-	SetStorageSubscriptionRequest,
-} from "./messages";
-
+import { StorageMap } from "./data";
+import { Item, PlaceItemsEvent, RetrieveItemsRequest, GetStorageRequest, UpdateStorageEvent, SubscribeOnStorageRequest, PlaceEntitiesEvent, Entity } from "./messages";
 
 const exportCounter = new Counter(
 	"clusterio_subspace_storage_export_total",
@@ -35,228 +28,226 @@ const controllerInventoryGauge = new Gauge(
 	{ labels: ["resource"] }
 );
 
-
-async function loadDatabase(
-	config: lib.ControllerConfig,
-	logger: lib.Logger
-): Promise<lib.ItemDatabase> {
-	let itemsPath = path.resolve(config.get("controller.database_directory"), "items.json");
-	logger.verbose(`Loading ${itemsPath}`);
-	try {
-		let content = await fs.readFile(itemsPath, { encoding: "utf8" });
-		return new lib.ItemDatabase(JSON.parse(content));
-
-	} catch (err: any) {
-		if (err.code === "ENOENT") {
-			logger.verbose("Creating new item database");
-			return new lib.ItemDatabase();
-		}
-		throw err;
-	}
-}
-
-async function saveDatabase(
-	controllerConfig: lib.ControllerConfig,
-	items: lib.ItemDatabase | undefined,
-	logger: lib.Logger,
-) {
-	if (items && items.size < 50000) {
-		let file = path.resolve(controllerConfig.get("controller.database_directory"), "items.json");
-		logger.verbose(`writing ${file}`);
-		let content = JSON.stringify(items.serialize());
-		await lib.safeOutputFile(file, content);
-	} else if (items) {
-		logger.error(`Item database too large, not saving (${items.size})`);
-	}
-}
-
 export class ControllerPlugin extends BaseControllerPlugin {
-	items!: lib.ItemDatabase;
-	itemUpdateRateLimiter!: lib.RateLimiter;
-	itemsLastUpdate!: Map<string, number>;
-	subscribedControlLinks!: Set<ControlConnection>;
+	entities!: Set<Entity>;
+	storage!: StorageMap;
+	storageSnapshot!: StorageMap;
+	broadcaster!: lib.RateLimiter;
+	subscribers!: Set<ControlConnection>;
 	doleMagicId!: ReturnType<typeof setInterval>;
 	neuralDole!: dole.NeuralDole;
-	storageDirty = false;
+
+	private async load() {
+		let storagePath = path.resolve(this.controller.config.get("controller.database_directory"), "storage.json");
+		this.logger.verbose(`Loading ${storagePath}`);
+		try {
+			this.storage = new StorageMap(JSON.parse(await fs.readFile(storagePath, { encoding: "utf8" })));
+			this.storageSnapshot = new StorageMap(this.storage.serialize());
+		} catch (err: any) {
+			if (err.code === "ENOENT") {
+				this.logger.verbose("Creating new item database");
+				return new StorageMap();
+			}
+			throw err;
+		}
+	}
+
+	private async save() {
+		if (this.storage.size < 50000) {
+			let file = path.resolve(this.controller.config.get("controller.database_directory"), "storage.json");
+			this.logger.verbose(`writing ${file}`);
+			await lib.safeOutputFile(file, JSON.stringify(this.storage.serialize()));
+		} else {
+			this.logger.error(`Item database too large, not saving (${this.storage.size})`);
+		}
+	}
 
 	async init() {
-		this.items = await loadDatabase(this.controller.config, this.logger);
-		this.itemUpdateRateLimiter = new lib.RateLimiter({
+		this.entities = new Set();
+
+		await this.load();
+
+		this.broadcaster = new lib.RateLimiter({
 			maxRate: 1,
 			action: () => {
 				try {
-					this.broadcastStorage();
+					this.broadcast();
 				} catch (err: any) {
 					this.logger.error(`Unexpected error sending storage update:\n${err.stack}`);
 				}
 			},
 		});
-		this.itemsLastUpdate = new Map(this.items.getEntries());
 
-		this.neuralDole = new dole.NeuralDole({ items: this.items });
+		this.subscribers = new Set();
+
+		this.neuralDole = new dole.NeuralDole({ storage: this.storage });
 		this.doleMagicId = setInterval(() => {
 			if (this.controller.config.get("subspace_storage.division_method") === "neural_dole") {
 				this.neuralDole.doMagic();
 			}
 		}, 1000);
 
-		this.subscribedControlLinks = new Set();
+		routes.addApiRoutes(this.controller.app, this.storage);
 
-		routes.addApiRoutes(this.controller.app, this.items);
-
+		this.controller.handle(PlaceEntitiesEvent, this.handlePlaceEntityEvent.bind(this));
 		this.controller.handle(GetStorageRequest, this.handleGetStorageRequest.bind(this));
-		this.controller.handle(PlaceEvent, this.handlePlaceEvent.bind(this));
-		this.controller.handle(RemoveRequest, this.handleRemoveRequest.bind(this));
-		this.controller.handle(SetStorageSubscriptionRequest, this.handleSetStorageSubscriptionRequest.bind(this));
+		this.controller.handle(PlaceItemsEvent, this.handlePlaceItemsEvent.bind(this));
+		this.controller.handle(RetrieveItemsRequest, this.handleRetrieveItemsRequest.bind(this));
+		this.controller.handle(SubscribeOnStorageRequest, this.handleSubscribeOnStorageRequest.bind(this));
 	}
 
-	updateStorage() {
-		this.itemUpdateRateLimiter.activate();
-		this.storageDirty = true;
-	}
-
-	broadcastStorage() {
-		let itemsToUpdateMap:Map<string, number> = new Map();
-		for (let [name, count] of this.items.getEntries()) {
-			if (this.itemsLastUpdate.get(name) === count) {
-				continue;
+	broadcast() {
+		if (this.entities.size) {
+			let entities = PlaceEntitiesEvent.fromJSON({ entities: [...this.entities].map(e => [e.force, e.x, e.y, e.name]) });
+			this.controller.sendTo("allInstances", entities);
+			for (let link of this.subscribers) {
+				link.send(entities);
 			}
-			itemsToUpdateMap.set(name, count);
+			this.entities = new Set();
 		}
 
-		if (!itemsToUpdateMap.size) {
-			return;
+
+		let diff: StorageMap = new StorageMap();
+		for (let [force, x, y, name, count] of this.storage) {
+			if (this.storageSnapshot.get(force, x, y, name) !== count) {
+				diff.set(force, x, y, name, count);
+			}
 		}
 
-		let itemsToUpdate = [...itemsToUpdateMap.entries()];
-		let update = UpdateStorageEvent.fromJSON({ items: itemsToUpdate });
-		this.controller.sendTo("allInstances", update);
-		for (let link of this.subscribedControlLinks) {
-			link.send(update);
+		if (diff.size) {
+			let items = UpdateStorageEvent.fromJSON({ items: [...diff] });
+			this.controller.sendTo("allInstances", items);
+			for (let link of this.subscribers) {
+				link.send(items);
+			}
+			this.storageSnapshot = new StorageMap(this.storage.serialize());
 		}
-		this.itemsLastUpdate = new Map(this.items.getEntries());
 	}
 
-	async handleGetStorageRequest() {
-		return [...this.items.getEntries()];
-	}
-
-	async handlePlaceEvent(request: PlaceEvent, src: lib.Address) {
-		let instanceId = src.id;
-
-		for (let item of request.items) {
-			this.items.addItem(item.name, item.count);
-			exportCounter.labels(String(instanceId), item.name).inc(item.count);
+	async handlePlaceEntityEvent({ entities }: PlaceEntitiesEvent, { id: instanceId }: lib.Address) {
+		for (let entity of entities) {
+			this.entities.add(entity);
 		}
 
-		this.updateStorage();
+		this.broadcaster.activate();
 
 		if (this.controller.config.get("subspace_storage.log_item_transfers")) {
 			this.logger.verbose(
-				`Imported the following from ${instanceId}:\n${JSON.stringify(request.items)}`
+				`Broadcasted the following entities from ${instanceId}:\n${JSON.stringify(entities)}`
 			);
 		}
 	}
 
-	async handleRemoveRequest(request: RemoveRequest, src: lib.Address) {
-		let method = this.controller.config.get("subspace_storage.division_method");
-		let instanceId = src.id;
+	async handleGetStorageRequest() {
+		return [...this.storage];
+	}
 
-		let itemsRemoved = [];
-		if (method === "simple") {
+	async handlePlaceItemsEvent({ items }: PlaceItemsEvent, { id: instanceId }: lib.Address) {
+		for (let { force, x, y, name, count } of items) {
+			this.storage.update(force, x, y, name, c => c + count);
+			exportCounter.labels(String(instanceId), force, `${x}`, `${y}`, name).inc(count);
+		}
+
+		this.broadcaster.activate();
+
+		if (this.controller.config.get("subspace_storage.log_item_transfers")) {
+			this.logger.verbose(
+				`Imported the following from ${instanceId}:\n${JSON.stringify(items)}`
+			);
+		}
+	}
+
+	async handleRetrieveItemsRequest({ items }: RetrieveItemsRequest, { id: instanceId }: lib.Address) {
+		let instanceName = this.controller.instances.get(instanceId)?.config.get("instance.name") ?? "unknown";
+
+		let itemsRetrieved = [];
+		switch (this.controller.config.get("subspace_storage.division_method")) {
 			// Give out as much items as possible until there are 0 left.  This
 			// might lead to one host getting all the items and the rest nothing.
-			for (let item of request.items) {
-				let count = this.items.getItemCount(item.name);
-				let toRemove = Math.min(count, item.count);
-				if (toRemove > 0) {
-					this.items.removeItem(item.name, toRemove);
-					itemsRemoved.push(new Item(item.name, toRemove));
-				}
-			}
-
-		} else {
-			let instance = this.controller.instances.get(instanceId);
-			let instanceName = instance ? instance.config.get("instance.name") : "unkonwn";
-
-			// use fancy neural net to calculate a "fair" dole division rate.
-			if (method === "neural_dole") {
-				for (let item of request.items) {
-					let count = this.neuralDole.divider(
-						{ name: item.name, count: item.count, instanceId, instanceName }
-					);
-					if (count > 0) {
-						itemsRemoved.push(new Item(item.name, count));
+			case "simple":
+				for (let { force, x, y, name, count } of items) {
+					let sent = Math.min(count, this.storage.get(force, x, y, name));
+					if (sent > 0) {
+						this.storage.update(force, x, y, name, c => c - sent);
+						itemsRetrieved.push(new Item(force, x, y, name, sent));
 					}
 				}
+				break;
+
+			// use fancy neural net to calculate a "fair" dole division rate.
+			case "neural_dole":
+				for (let item of items) {
+					let count = this.neuralDole.divider(
+						{ ...item, instanceId, instanceName }
+					);
+					if (count > 0) {
+						itemsRetrieved.push(new Item(item.force, item.x, item.y, item.name, count));
+					}
+				}
+				break;
 
 			// Use dole division. Makes it really slow to drain out the last little bit.
-			} else if (method === "dole") {
-				for (let item of request.items) {
+			case "dole":
+				for (let item of items) {
 					let count = dole.doleDivider({
-						object: { name: item.name, count: item.count, instanceId, instanceName },
-						items: this.items,
+						object: { ...item, instanceId, instanceName },
+						items: this.storage,
 						logItemTransfers: this.controller.config.get("subspace_storage.log_item_transfers"),
 						logger: this.logger,
 					});
 					if (count > 0) {
-						itemsRemoved.push(new Item(item.name, count));
+						itemsRetrieved.push(new Item(item.force, item.x, item.y, item.name, count));
 					}
 				}
+				break;
 
 			// Should not be possible
-			} else {
-				throw Error(`Unkown division_method ${method}`);
-			}
+			default:
+				throw Error(`Unkown division_method ${this.controller.config.get("subspace_storage.division_method")}`);
 		}
 
-		if (itemsRemoved.length) {
-			for (let item of itemsRemoved) {
+		if (itemsRetrieved.length) {
+			for (let item of itemsRetrieved) {
 				importCounter.labels(String(instanceId), item.name).inc(item.count);
 			}
 
-			this.updateStorage();
+			this.broadcaster.activate();
 
-			if (itemsRemoved.length && this.controller.config.get("subspace_storage.log_item_transfers")) {
-				this.logger.verbose(`Exported the following to ${instanceId}:\n${JSON.stringify(itemsRemoved)}`);
+			if (this.controller.config.get("subspace_storage.log_item_transfers")) {
+				this.logger.verbose(`Exported the following to ${instanceId}:\n${JSON.stringify(itemsRetrieved)}`);
 			}
 		}
 
-		return itemsRemoved;
+		return itemsRetrieved;
 	}
 
-	async handleSetStorageSubscriptionRequest(request: SetStorageSubscriptionRequest, src: lib.Address) {
+	async handleSubscribeOnStorageRequest(request: SubscribeOnStorageRequest, src: lib.Address) {
 		let link = this.controller.wsServer.controlConnections.get(src.id)!;
 		if (request.storage) {
-			this.subscribedControlLinks.add(link);
+			this.subscribers.add(link);
 		} else {
-			this.subscribedControlLinks.delete(link);
+			this.subscribers.delete(link);
 		}
 	}
 
 	onControlConnectionEvent(connection: ControlConnection, event: string) {
 		if (event === "close") {
-			this.subscribedControlLinks.delete(connection);
+			this.subscribers.delete(connection);
 		}
 	}
 
 	async onMetrics() {
-		if (this.items) {
-			for (let [key, count] of this.items.getEntries()) {
-				controllerInventoryGauge.labels(key).set(Number(count) || 0);
-			}
+		for (let [force, x, y, name, count] of this.storage) {
+			controllerInventoryGauge.labels(force, `${x}`, `${y}`, name).set(count);
 		}
-	}
-
-	async onShutdown() {
-		this.itemUpdateRateLimiter.cancel();
-		clearInterval(this.doleMagicId);
 	}
 
 	async onSaveData() {
-		if (this.storageDirty) {
-			this.storageDirty = false;
-			await saveDatabase(this.controller.config, this.items, this.logger);
-		}
+		await this.save();
+	}
+
+	async onShutdown() {
+		this.broadcaster.cancel();
+		clearInterval(this.doleMagicId);
 	}
 }

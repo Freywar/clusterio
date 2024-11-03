@@ -10,11 +10,13 @@ import {
 
 // ./module/sync.lua
 type IpcContribution = {
+	force: string,
 	name: string,
 	level: number,
 	contribution: number,
 };
 type IpcFinished = {
+	force: string,
 	name: string,
 	level: number,
 };
@@ -43,8 +45,8 @@ export class InstancePlugin extends BaseInstancePlugin {
 		this.instance.handle(FinishedEvent, this.handleFinishedEvent.bind(this));
 	}
 
-	async researchContribution(tech: IpcContribution) {
-		this.instance.sendTo("controller", new ContributionEvent(tech.name, tech.level, tech.contribution));
+	async researchContribution({ force, name, level, contribution }: IpcContribution) {
+		this.instance.sendTo("controller", new ContributionEvent(force, name, level, contribution));
 	}
 
 	async handleProgressEvent(event: ProgressEvent) {
@@ -55,17 +57,17 @@ export class InstancePlugin extends BaseInstancePlugin {
 		await this.sendOrderedRcon(`/sc research_sync.update_progress("${techsJson}")`, true);
 	}
 
-	async researchFinished(tech: IpcFinished) {
-		this.instance.sendTo("controller", new FinishedEvent(tech.name, tech.level));
+	async researchFinished({ force, name, level }: IpcFinished) {
+		this.instance.sendTo("controller", new FinishedEvent(force, name, level));
 	}
 
 	async handleFinishedEvent(event: FinishedEvent) {
 		if (!this.syncStarted || !["starting", "running"].includes(this.instance.status)) {
 			return;
 		}
-		let { name, level } = event;
+		let { force, name, level } = event;
 		await this.sendOrderedRcon(
-			`/sc research_sync.research_technology("${lib.escapeString(name)}", ${level})`, true
+			`/sc research_sync.research_technology("${lib.escapeString(force)}", "${lib.escapeString(name)}", ${level})`, true
 		);
 	}
 
@@ -75,20 +77,21 @@ export class InstancePlugin extends BaseInstancePlugin {
 		let instanceTechs = new Map();
 		for (let tech of JSON.parse(dumpJson)) {
 			techsToSend.push(new TechnologySync(
+				tech.force,
 				tech.name,
 				tech.level,
 				tech.progress || null,
 				tech.researched,
 			));
-			instanceTechs.set(tech.name, tech);
+			(instanceTechs.get(tech.force) ?? instanceTechs.set(tech.force, new Map()).get(tech.force))!.set(tech.name, tech);
 		}
 
 		let controllerTechs = await this.instance.sendTo("controller", new SyncTechnologiesRequest(techsToSend));
 		this.syncStarted = true;
 		let techsToSync = [];
 		for (let controllerTech of controllerTechs) {
-			let { name, level, progress, researched } = controllerTech;
-			let instanceTech = instanceTechs.get(name);
+			let { force, name, level, progress, researched } = controllerTech;
+			let instanceTech = instanceTechs.get(force)?.get(name);
 			if (
 				!instanceTech
 				|| instanceTech.level !== level

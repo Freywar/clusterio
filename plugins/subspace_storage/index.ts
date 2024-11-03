@@ -50,11 +50,12 @@ export const plugin: lib.PluginDeclaration = {
 	},
 
 	messages: [
-		messages.PlaceEvent,
-		messages.RemoveRequest,
+		messages.PlaceEntitiesEvent,
 		messages.GetStorageRequest,
+		messages.PlaceItemsEvent,
+		messages.RetrieveItemsRequest,
 		messages.UpdateStorageEvent,
-		messages.SetStorageSubscriptionRequest,
+		messages.SubscribeOnStorageRequest,
 	],
 	webEntrypoint: "./web",
 	routes: ["/storage"],

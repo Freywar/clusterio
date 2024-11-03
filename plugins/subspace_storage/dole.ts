@@ -1,3 +1,4 @@
+import { StorageMap } from "./data";
 import * as doleNN from "./dole_nn_base";
 
 import * as lib from "@clusterio/lib";
@@ -6,7 +7,7 @@ const { Gauge } = lib;
 
 const prometheusNNDoleGauge = new Gauge(
 	"clusterio_subspace_storage_nn_dole_gauge",
-	"Current demand being supplied by Neural Network ; 1 means all demand covered, "+
+	"Current demand being supplied by Neural Network ; 1 means all demand covered, " +
 	"0.5 means about half of each supply is covered, 0 means no items are given",
 	{ labels: ["resource"] }
 );
@@ -17,14 +18,14 @@ const prometheusDoleFactorGauge = new Gauge(
 );
 
 export class NeuralDole {
-	getRequestStats(itemname: string, samples: number): number {
+	getRequestStats(force: string, x: number, y: number, name: string, samples: number): number {
 		let sum = 0;
-		samples = Math.min(samples, (this.stats[itemname] || []).length - 1);
+		samples = Math.min(samples, (this.stats[force][x][y][name] || []).length - 1);
 		if (samples < 1) {
 			return 0.1;
 		}
 		for (let i = 1; i <= samples; i++) {
-			sum += this.stats[itemname][i].req;
+			sum += this.stats[force][x][y][name][i].req;
 		}
 		if (sum === 0) {
 			return 0.1;
@@ -32,49 +33,49 @@ export class NeuralDole {
 		return sum / samples;
 	}
 
-	items: lib.ItemDatabase;
-	itemsLastTick: Map<string, number>;
+	storage: StorageMap;
+	storageLastTick: StorageMap;
 	dole: any = {};
 	carry: any = {};
 	lastRequest: any = {};
 	stats: any = {};
 	debt: any = {};
-	constructor({ items }: { items: lib.ItemDatabase }) {
+	constructor({ storage }: { storage: StorageMap }) {
 		// Set some storage variables for the dole divider
-		this.items = items;
-		this.itemsLastTick = new Map(items.getEntries());
+		this.storage = storage;
+		this.storageLastTick = new StorageMap(storage.serialize());
 	}
 
 	doMagic() {
-		for (let [name, count] of this.items.getEntries()) {
+		for (let [force, x, y, name, count] of this.storage) {
 			let magicData = doleNN.tick(
 				count,
 				this.dole[name],
-				this.itemsLastTick.get(name) || 0,
-				this.getRequestStats(name, 5)
+				this.storageLastTick.get(force, x, y, name),
+				this.getRequestStats(force, x, y, name, 5)
 			);
-			this.stats[name] = this.stats[name] || [];
-			this.stats[name].unshift({ req: 0, given: 0 }); // stats[name][0] is the one we currently collect
-			if (this.stats[name].length>10) {
-				this.stats[name].pop(); // remove if too many samples in stats
+			this.stats[force][x][y][name] = this.stats[force][x][y][name] || [];
+			this.stats[force][x][y][name].unshift({ req: 0, given: 0 }); // stats[name][0] is the one we currently collect
+			if (this.stats[force][x][y][name].length > 10) {
+				this.stats[force][x][y][name].pop(); // remove if too many samples in stats
 			}
 
 			this.dole[name] = magicData[0];
 			// DONE handle magicData[1] for graphing for our users
 			prometheusNNDoleGauge.labels(name).set(magicData[1] || 0);
 		}
-		this.itemsLastTick = new Map(this.items.getEntries());
+		this.storageLastTick = new StorageMap(this.storage);
 	}
 
-	divider(object: { name:string, count:number, instanceId:number, instanceName:string }): number {
+	divider(object: { force: string, x: number, y: number, name: string, count: number, instanceId: number, instanceName: string }): number {
 		let magicData = doleNN.dose(
 			object.count, // numReq
-			this.items.getItemCount(object.name) || 0,
-			this.itemsLastTick.get(object.name) || 0,
+			this.storage.get(object.force, object.x, object.y, object.name),
+			this.storageLastTick.get(object.force, object.x, object.y, object.name) || 0,
 			this.dole[object.name],
 			this.carry[`${object.name} ${object.instanceId}`] || 0,
 			this.lastRequest[`${object.name}_${object.instanceId}_${object.instanceName}`] || 0,
-			this.getRequestStats(object.name, 5),
+			this.getRequestStats(object.force, object.x, object.y, object.name, 5),
 			this.debt[`${object.name} ${object.instanceId}`] || 0
 		);
 		if ((this.stats[object.name] || []).length > 0) {
@@ -90,7 +91,7 @@ export class NeuralDole {
 		this.debt[`${object.name} ${object.instanceId}`] = magicData[3];
 
 		// Remove item from DB and send it
-		this.items.removeItem(object.name, magicData[0]);
+		this.storage.update(object.force, object.x, object.y, object.name, c => c - magicData[0]);
 
 		return magicData[0];
 	}
@@ -98,21 +99,21 @@ export class NeuralDole {
 
 // If the server regularly can't fulfill requests, this number grows until
 // it can. Then it slowly shrinks back down.
-let _doleDivisionFactor: { [key:string]: number } = {};
+let _doleDivisionFactor: { [key: string]: number } = {};
 export function doleDivider(
 	{
 		object,
 		items,
 		logItemTransfers,
 		logger,
-	} :{
-		object: { name:string, count:number, instanceId:number, instanceName:string },
-		items: lib.ItemDatabase,
+	}: {
+		object: { force: string, x: number, y: number, name: string, count: number, instanceId: number, instanceName: string },
+		items: StorageMap,
 		logItemTransfers: boolean,
 		logger: lib.Logger,
 	},
 ) {
-	let itemCount = items.getItemCount(object.name);
+	let itemCount = items.get(object.force, object.x, object.y, object.name) || 0;
 	// lower rates will equal more dramatic swings
 	const doleDivisionRetardation = 10;
 	// a higher cap will divide the store more ways, but will take longer to
@@ -124,10 +125,10 @@ export function doleDivider(
 	object.count = Math.round(object.count);
 	if (logItemTransfers) {
 		logger.verbose(
-			`Serving ${object.count}/${originalCount} ${object.name} from ${itemCount} ${object.name} `+
-			`with dole division factor ${(_doleDivisionFactor[object.name]||0)} `+
-			`(real=${((_doleDivisionFactor[object.name] || 0) + doleDivisionRetardation) / doleDivisionRetardation}), `+
-			`item is ${itemCount > object.count?"stocked":"short"}.`
+			`Serving ${object.count}/${originalCount} ${object.name} from ${itemCount} ${object.name} ` +
+			`with dole division factor ${(_doleDivisionFactor[object.name] || 0)} ` +
+			`(real=${((_doleDivisionFactor[object.name] || 0) + doleDivisionRetardation) / doleDivisionRetardation}), ` +
+			`item is ${itemCount > object.count ? "stocked" : "short"}.`
 		);
 	}
 
@@ -135,7 +136,7 @@ export function doleDivider(
 	if (itemCount > object.count) {
 		// If successful, increase dole
 		_doleDivisionFactor[object.name] = Math.max(_doleDivisionFactor[object.name] || 1, 1) - 1;
-		items.removeItem(object.name, object.count);
+		items.update(object.force, object.x, object.y, object.name, c => c - object.count);
 
 		prometheusDoleFactorGauge.labels(object.name).set(_doleDivisionFactor[object.name] || 0);
 		return object.count;

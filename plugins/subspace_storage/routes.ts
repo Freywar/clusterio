@@ -1,7 +1,7 @@
 import type { Application, Request, Response } from "express";
 import * as lib from "@clusterio/lib";
 
-export function addApiRoutes(app: Application, items: lib.ItemDatabase) {
+export function addApiRoutes(app: Application, items: lib.Database) {
 
 	/**
 	 * GET endpoint to read the controllers current inventory of items.
