@@ -6,11 +6,14 @@ import path from "path";
 import * as lib from "@clusterio/lib";
 const { Counter, Gauge } = lib;
 
-import * as routes from "./routes";
 import * as dole from "./dole";
+import * as routes from "./routes";
 
-import { StorageMap } from "./data";
-import { Item, PlaceItemsEvent, RetrieveItemsRequest, GetStorageRequest, UpdateStorageEvent, SubscribeOnStorageRequest, PlaceEntitiesEvent, Entity } from "./messages";
+import { ChunkMap, EntityName, ItemName } from "./data";
+import {
+	Delta, GetStorageRequest, ManageSubscriptionRequest, PlaceEndpointsEvent, TransferItemsRequest,
+	UpdateEndpointsEvent, UpdateStorageEvent,
+} from "./messages";
 
 const exportCounter = new Counter(
 	"clusterio_subspace_storage_export_total",
@@ -29,41 +32,61 @@ const controllerInventoryGauge = new Gauge(
 );
 
 export class ControllerPlugin extends BaseControllerPlugin {
-	entities!: Set<Entity>;
-	storage!: StorageMap;
-	storageSnapshot!: StorageMap;
+	endpoints!: ChunkMap<EntityName>;
+	endpointsSnapshot!: ChunkMap<EntityName>;
+	storage!: ChunkMap<ItemName>;
+	storageSnapshot!: ChunkMap<ItemName>;
 	broadcaster!: lib.RateLimiter;
 	subscribers!: Set<ControlConnection>;
 	doleMagicId!: ReturnType<typeof setInterval>;
 	neuralDole!: dole.NeuralDole;
 
 	private async load() {
-		let storagePath = path.resolve(this.controller.config.get("controller.database_directory"), "storage.json");
+		// TODO Better re-scan them on startup/instance connection.
+		const endpointsPath =
+			path.resolve(this.controller.config.get("controller.database_directory"), "endpoints.json");
+		this.logger.verbose(`Loading ${endpointsPath}`);
+		try {
+			this.endpoints = new ChunkMap(JSON.parse(await fs.readFile(endpointsPath, { encoding: "utf8" })));
+		} catch (err: any) {
+			if (err.code === "ENOENT") {
+				this.logger.verbose("Failed to load endpoints, resetting the map");
+				this.endpoints = new ChunkMap();
+				this.endpointsSnapshot = new ChunkMap();
+			}
+			throw err;
+		}
+
+		const storagePath =
+			path.resolve(this.controller.config.get("controller.database_directory"), "storage.json");
 		this.logger.verbose(`Loading ${storagePath}`);
 		try {
-			this.storage = new StorageMap(JSON.parse(await fs.readFile(storagePath, { encoding: "utf8" })));
-			this.storageSnapshot = new StorageMap(this.storage.serialize());
+			this.storage = new ChunkMap(JSON.parse(await fs.readFile(storagePath, { encoding: "utf8" })));
+			this.storageSnapshot = new ChunkMap(this.storage.serialize());
 		} catch (err: any) {
 			if (err.code === "ENOENT") {
 				this.logger.verbose("Creating new item database");
-				return new StorageMap();
+				this.storage = new ChunkMap();
+				this.storageSnapshot = new ChunkMap();
 			}
 			throw err;
 		}
 	}
 
 	private async save() {
-		if (this.storage.size < 50000) {
-			let file = path.resolve(this.controller.config.get("controller.database_directory"), "storage.json");
-			this.logger.verbose(`writing ${file}`);
-			await lib.safeOutputFile(file, JSON.stringify(this.storage.serialize()));
-		} else {
-			this.logger.error(`Item database too large, not saving (${this.storage.size})`);
-		}
+		const endpointPath = path.resolve(this.controller.config.get("controller.database_directory"), "storage.json");
+		this.logger.verbose(`Writing endpoints to ${endpointPath}`);
+		await lib.safeOutputFile(endpointPath, JSON.stringify(this.endpoints.serialize()));
+
+		const storagePath = path.resolve(this.controller.config.get("controller.database_directory"), "storage.json");
+		this.logger.verbose(`Writing storage to ${storagePath}`);
+		await lib.safeOutputFile(storagePath, JSON.stringify(this.storage.serialize()));
 	}
 
 	async init() {
-		this.entities = new Set();
+		this.endpoints = new ChunkMap();
+		this.storage = new ChunkMap();
+		this.storageSnapshot = new ChunkMap();
 
 		await this.load();
 
@@ -73,7 +96,7 @@ export class ControllerPlugin extends BaseControllerPlugin {
 				try {
 					this.broadcast();
 				} catch (err: any) {
-					this.logger.error(`Unexpected error sending storage update:\n${err.stack}`);
+					this.logger.error(`Unexpected error sending updates:\n${err.stack}`);
 				}
 			},
 		});
@@ -89,51 +112,58 @@ export class ControllerPlugin extends BaseControllerPlugin {
 
 		routes.addApiRoutes(this.controller.app, this.storage);
 
-		this.controller.handle(PlaceEntitiesEvent, this.handlePlaceEntityEvent.bind(this));
+		this.controller.handle(ManageSubscriptionRequest, this.handleManageSubscriptionRequest.bind(this));
+		this.controller.handle(GetStorageRequest, this.handleGetEndpointsRequest.bind(this));
+		this.controller.handle(PlaceEndpointsEvent, this.handlePlaceEndpointsEvent.bind(this));
 		this.controller.handle(GetStorageRequest, this.handleGetStorageRequest.bind(this));
-		this.controller.handle(PlaceItemsEvent, this.handlePlaceItemsEvent.bind(this));
-		this.controller.handle(RetrieveItemsRequest, this.handleRetrieveItemsRequest.bind(this));
-		this.controller.handle(SubscribeOnStorageRequest, this.handleSubscribeOnStorageRequest.bind(this));
+		this.controller.handle(TransferItemsRequest, this.handleTransferItemsRequest.bind(this));
 	}
 
 	broadcast() {
-		if (this.entities.size) {
-			let entities = PlaceEntitiesEvent.fromJSON({ entities: [...this.entities].map(e => [e.force, e.x, e.y, e.name]) });
-			this.controller.sendTo("allInstances", entities);
-			for (let link of this.subscribers) {
-				link.send(entities);
+		if (this.endpoints.size) {
+			// TODO Only send the diff.
+			const event = UpdateEndpointsEvent.fromJSON({ endpoints: [...this.endpoints] });
+			this.controller.sendTo("allInstances", event);
+			for (const subscriber of this.subscribers) {
+				subscriber.send(event);
 			}
-			this.entities = new Set();
 		}
 
-
-		let diff: StorageMap = new StorageMap();
-		for (let [force, x, y, name, count] of this.storage) {
-			if (this.storageSnapshot.get(force, x, y, name) !== count) {
-				diff.set(force, x, y, name, count);
+		const diff: ChunkMap<ItemName> = new ChunkMap();
+		for (const key of this.storage.keys()) {
+			if (this.storageSnapshot.get(...key) !== this.storage.get(...key)) {
+				diff.set(...key, this.storage.get(...key));
 			}
 		}
 
 		if (diff.size) {
-			let items = UpdateStorageEvent.fromJSON({ items: [...diff] });
-			this.controller.sendTo("allInstances", items);
-			for (let link of this.subscribers) {
-				link.send(items);
+			const event = UpdateStorageEvent.fromJSON({ items: [...diff] });
+			this.controller.sendTo("allInstances", event);
+			for (const subscriber of this.subscribers) {
+				subscriber.send(event);
 			}
-			this.storageSnapshot = new StorageMap(this.storage.serialize());
+			this.storageSnapshot = new ChunkMap(this.storage.serialize());
 		}
 	}
 
-	async handlePlaceEntityEvent({ entities }: PlaceEntitiesEvent, { id: instanceId }: lib.Address) {
-		for (let entity of entities) {
-			this.entities.add(entity);
+	async handleManageSubscriptionRequest({ subscribe }: ManageSubscriptionRequest, src: lib.Address) {
+		this.subscribers[subscribe ? "add" : "delete"](this.controller.wsServer.controlConnections.get(src.id)!);
+	}
+
+	async handleGetEndpointsRequest() {
+		return [...this.endpoints];
+	}
+
+	async handlePlaceEndpointsEvent({ endpoints }: UpdateEndpointsEvent, { id: instanceId }: lib.Address) {
+		for (const { force, cx, cy, name, count } of endpoints) {
+			this.endpoints.update(force, cx, cy, name, c => c + count);
 		}
 
 		this.broadcaster.activate();
 
 		if (this.controller.config.get("subspace_storage.log_item_transfers")) {
 			this.logger.verbose(
-				`Broadcasted the following entities from ${instanceId}:\n${JSON.stringify(entities)}`
+				`Received the following endpoint changes from ${instanceId}:\n${JSON.stringify(endpoints)}`
 			);
 		}
 	}
@@ -142,61 +172,53 @@ export class ControllerPlugin extends BaseControllerPlugin {
 		return [...this.storage];
 	}
 
-	async handlePlaceItemsEvent({ items }: PlaceItemsEvent, { id: instanceId }: lib.Address) {
-		for (let { force, x, y, name, count } of items) {
-			this.storage.update(force, x, y, name, c => c + count);
-			exportCounter.labels(String(instanceId), force, `${x}`, `${y}`, name).inc(count);
+	async handleTransferItemsRequest({ items }: TransferItemsRequest, { id: instanceId }: lib.Address) {
+		const instanceName = this.controller.instances.get(instanceId)?.config.get("instance.name") ?? "unknown";
+
+		const received = items.filter(({ count }) => count > 0);
+		for (const { force, cx, cy, name, count } of received) {
+			this.storage.update(force, cx, cy, name, c => c + count);
 		}
 
-		this.broadcaster.activate();
-
-		if (this.controller.config.get("subspace_storage.log_item_transfers")) {
-			this.logger.verbose(
-				`Imported the following from ${instanceId}:\n${JSON.stringify(items)}`
-			);
-		}
-	}
-
-	async handleRetrieveItemsRequest({ items }: RetrieveItemsRequest, { id: instanceId }: lib.Address) {
-		let instanceName = this.controller.instances.get(instanceId)?.config.get("instance.name") ?? "unknown";
-
-		let itemsRetrieved = [];
+		const requested = items.filter(({ count }) => count < 0);
+		const sent = [];
 		switch (this.controller.config.get("subspace_storage.division_method")) {
-			// Give out as much items as possible until there are 0 left.  This
+			// Give out as much items as possible until there are 0 left. This
 			// might lead to one host getting all the items and the rest nothing.
 			case "simple":
-				for (let { force, x, y, name, count } of items) {
-					let sent = Math.min(count, this.storage.get(force, x, y, name));
-					if (sent > 0) {
-						this.storage.update(force, x, y, name, c => c - sent);
-						itemsRetrieved.push(new Item(force, x, y, name, sent));
+				for (const { force, cx, cy, name, count } of requested) {
+					const delta = Math.min(-count, this.storage.get(force, cx, cy, name));
+					if (delta > 0) {
+						this.storage.update(force, cx, cy, name, c => c - delta);
+						sent.push(new Delta(force, cx, cy, name, delta));
 					}
 				}
 				break;
 
-			// use fancy neural net to calculate a "fair" dole division rate.
+			// Use fancy neural net to calculate a "fair" dole division rate.
 			case "neural_dole":
-				for (let item of items) {
-					let count = this.neuralDole.divider(
-						{ ...item, instanceId, instanceName }
-					);
-					if (count > 0) {
-						itemsRetrieved.push(new Item(item.force, item.x, item.y, item.name, count));
+				for (const { force, cx, cy, name, count } of requested) {
+					const delta =
+						this.neuralDole.divider({ force, cx, cy, name, count: -count, instanceId, instanceName });
+					if (delta > 0) {
+						this.storage.update(force, cx, cy, name, c => c - delta);
+						sent.push(new Delta(force, cx, cy, name, delta));
 					}
 				}
 				break;
 
 			// Use dole division. Makes it really slow to drain out the last little bit.
 			case "dole":
-				for (let item of items) {
-					let count = dole.doleDivider({
-						object: { ...item, instanceId, instanceName },
+				for (const { force, cx, cy, name, count } of requested) {
+					const delta = dole.doleDivider({
+						object: { force, cx, cy, name, count: -count, instanceId, instanceName },
 						items: this.storage,
 						logItemTransfers: this.controller.config.get("subspace_storage.log_item_transfers"),
 						logger: this.logger,
 					});
-					if (count > 0) {
-						itemsRetrieved.push(new Item(item.force, item.x, item.y, item.name, count));
+					if (delta > 0) {
+						this.storage.update(force, cx, cy, name, c => c - delta);
+						sent.push(new Delta(force, cx, cy, name, delta));
 					}
 				}
 				break;
@@ -206,29 +228,37 @@ export class ControllerPlugin extends BaseControllerPlugin {
 				throw Error(`Unkown division_method ${this.controller.config.get("subspace_storage.division_method")}`);
 		}
 
-		if (itemsRetrieved.length) {
-			for (let item of itemsRetrieved) {
-				importCounter.labels(String(instanceId), item.name).inc(item.count);
-			}
-
+		if (received.length || sent.length) {
 			this.broadcaster.activate();
+		}
+
+		if (received.length) {
+			for (const { name, count } of received) {
+				exportCounter.labels(String(instanceId), name).inc(count);
+			}
 
 			if (this.controller.config.get("subspace_storage.log_item_transfers")) {
-				this.logger.verbose(`Exported the following to ${instanceId}:\n${JSON.stringify(itemsRetrieved)}`);
+				this.logger.verbose(
+					`Imported the following from ${instanceId}:\n${JSON.stringify(received)}`
+				);
 			}
 		}
 
-		return itemsRetrieved;
+		if (sent.length) {
+			for (const { name, count } of sent) {
+				importCounter.labels(String(instanceId), name).inc(count);
+			}
+			if (this.controller.config.get("subspace_storage.log_item_transfers")) {
+				this.logger.verbose(
+					`Exported the following to ${instanceId}:\n${JSON.stringify(sent)}`
+				);
+			}
+		}
+
+		// TODO This should also acknowledge items received.
+		return sent;
 	}
 
-	async handleSubscribeOnStorageRequest(request: SubscribeOnStorageRequest, src: lib.Address) {
-		let link = this.controller.wsServer.controlConnections.get(src.id)!;
-		if (request.storage) {
-			this.subscribers.add(link);
-		} else {
-			this.subscribers.delete(link);
-		}
-	}
 
 	onControlConnectionEvent(connection: ControlConnection, event: string) {
 		if (event === "close") {
@@ -237,7 +267,7 @@ export class ControllerPlugin extends BaseControllerPlugin {
 	}
 
 	async onMetrics() {
-		for (let [force, x, y, name, count] of this.storage) {
+		for (const [force, x, y, name, count] of this.storage) {
 			controllerInventoryGauge.labels(force, `${x}`, `${y}`, name).set(count);
 		}
 	}

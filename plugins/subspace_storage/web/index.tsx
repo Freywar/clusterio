@@ -1,20 +1,19 @@
-import React, { useContext, useEffect, useState } from "react";
 import { Input, Table, Typography } from "antd";
+import { useContext, useEffect, useState } from "react";
 
 import {
-	BaseWebPlugin, PageLayout, PageHeader, Control, ControlContext,
-	notifyErrorHandler, useItemMetadata, useLocale,
+	BaseWebPlugin, Control, ControlContext, notifyErrorHandler, PageHeader, PageLayout, useItemMetadata, useLocale,
 } from "@clusterio/web_ui";
-import { StorageMap } from "../data";
-import { GetStorageRequest, Item, SubscribeOnStorageRequest, UpdateStorageEvent } from "../messages";
+import { Count, GetStorageRequest, ManageSubscriptionRequest, UpdateStorageEvent } from "../messages";
 
+import { ChunkMap, ItemName } from "../data";
 import "./style.css";
 
 const { Paragraph } = Typography;
 
 function useStorage(control: Control) {
-	let plugin = control.plugins.get("subspace_storage") as WebPlugin;
-	let [storage, setStorage] = useState([...plugin.storage]);
+	const plugin = control.plugins.get("subspace_storage") as WebPlugin;
+	const [storage, setStorage] = useState([...plugin.storage]);
 
 	useEffect(() => {
 		function update() {
@@ -31,30 +30,28 @@ function useStorage(control: Control) {
 type ItemFilter = ([force, x, y, name, count]: [string, number, number, string, number]) => boolean;
 
 function StoragePage() {
-	let control = useContext(ControlContext);
-	let locale = useLocale();
-	let itemMetadata = useItemMetadata();
-	let storage = useStorage(control);
-	let [filter, setFilter] = useState<null | ItemFilter>(null);
+	const control = useContext(ControlContext);
+	const locale = useLocale();
+	const itemMetadata = useItemMetadata();
+	const storage = useStorage(control);
+	const [filter, setFilter] = useState<null | ItemFilter>(null);
 
 	function getLocaleName(name: string) {
-		let meta = itemMetadata.get(name);
+		const meta = itemMetadata.get(name);
 		if (meta?.localised_name) {
 			// TODO: implement the locale to name conversion.
 			return locale.get(meta.localised_name[0])!;
-		} else {
-			for (let section of ["item-name", "entity-name", "fluid-name", "equipment-name"]) {
-				let sectionedName = locale.get(`${section}.${name}`);
-				if (sectionedName) {
-					return sectionedName;
-				}
+		}
+		for (const section of ["item-name", "entity-name", "fluid-name", "equipment-name"]) {
+			const sectionedName = locale.get(`${section}.${name}`);
+			if (sectionedName) {
+				return sectionedName;
 			}
 		}
-
 		return name;
 	}
 
-	let NumberFormat = new Intl.NumberFormat("en-US");
+	const NumberFormat = new Intl.NumberFormat("en-US");
 
 	return <PageLayout nav={[{ name: "Storage" }]}>
 		<PageHeader title="Storage" />
@@ -62,14 +59,13 @@ function StoragePage() {
 			<Input
 				placeholder="Search"
 				onChange={(event) => {
-					let search = event.target.value.trim();
+					const search = event.target.value.trim();
 					if (!search) {
 						setFilter(null);
 						return;
 					}
-					let filterExpr = new RegExp(search.replace(/(^| )(\w)/g, "$1\\b$2").replace(/ +/g, ".*"), "i");
-					setFilter(() => (([, , , name, count]: [string, number, number, string, number]) =>
-						filterExpr.test(name) || filterExpr.test(getLocaleName(name))));
+					const filterExpr = new RegExp(search.replace(/(^| )(\w)/g, "$1\\b$2").replace(/ +/g, ".*"), "i");
+					setFilter(() => (([, , , name]: [string, number, number, string, number]) => filterExpr.test(name) || filterExpr.test(getLocaleName(name))));
 				}}
 			/>
 		</Paragraph>
@@ -83,7 +79,7 @@ function StoragePage() {
 						if (af > bf) { return 1; }
 						return 0;
 					},
-					render: (_, [force]) => <>{force ?? "player"}</>
+					render: (_, [force]) => <>{force ?? "player"}</>,
 				},
 				{
 					title: "Chunk",
@@ -95,14 +91,14 @@ function StoragePage() {
 						if (ay > by) { return 1; }
 						return 0;
 					},
-					render: (_, [, x, y]) => <>{x},{y}</>
+					render: (_, [, x, y]) => <>{x},{y}</>,
 				},
 				{
 					title: "Resource",
 					key: "resource",
 					sorter: ([, , , an], [, , , bn]) => {
-						let aln = getLocaleName(an);
-						let bln = getLocaleName(bn);
+						const aln = getLocaleName(an);
+						const bln = getLocaleName(bn);
 						if (aln < bln) { return -1; }
 						if (aln > bln) { return 1; }
 						return 0;
@@ -117,8 +113,8 @@ function StoragePage() {
 					key: "quantity",
 					align: "right",
 					defaultSortOrder: "descend",
-					sorter: ([,,,,ac], [,,,,bc]) => ac - bc,
-					render: (_, [,,,,count]) => NumberFormat.format(count),
+					sorter: ([, , , , ac], [, , , , bc]) => ac - bc,
+					render: (_, [, , , , count]) => NumberFormat.format(count),
 				},
 			]}
 			dataSource={filter ? storage.filter(filter) : storage}
@@ -129,7 +125,7 @@ function StoragePage() {
 }
 
 export class WebPlugin extends BaseWebPlugin {
-	storage = new StorageMap();
+	storage: ChunkMap<ItemName> = new ChunkMap();
 	callbacks: (() => void)[] = [];
 
 	async init() {
@@ -162,7 +158,7 @@ export class WebPlugin extends BaseWebPlugin {
 	}
 
 	offUpdate(callback: () => void) {
-		let index = this.callbacks.lastIndexOf(callback);
+		const index = this.callbacks.lastIndexOf(callback);
 		if (index === -1) {
 			throw new Error("callback is not registered");
 		}
@@ -179,7 +175,7 @@ export class WebPlugin extends BaseWebPlugin {
 		}
 
 		this.control
-			.send(new SubscribeOnStorageRequest(!!this.callbacks.length))
+			.send(new ManageSubscriptionRequest(Boolean(this.callbacks.length)))
 			.catch(notifyErrorHandler("Error subscribing to storage"));
 
 		if (this.callbacks.length) {
@@ -192,11 +188,11 @@ export class WebPlugin extends BaseWebPlugin {
 		}
 	}
 
-	updateStorage(items: Item[]) {
-		for (let { force, x, y, name, count } of items) {
-			this.storage.set(force, x, y, name, count);
+	updateStorage(items: Count<ItemName>[]) {
+		for (const { force, cx, cy, name, count } of items) {
+			this.storage.set(force, cx, cy, name, count);
 		}
-		for (let callback of this.callbacks) {
+		for (const callback of this.callbacks) {
 			callback();
 		}
 	}

@@ -1,18 +1,11 @@
-import * as lib from "@clusterio/lib";
 import { BaseInstancePlugin } from "@clusterio/host";
+import * as lib from "@clusterio/lib";
+import { ChunkCoordinate, EntityName, ForceName, ItemName } from "./data";
+import { Delta, GetStorageRequest, TransferItemsRequest, UpdateEndpointsEvent, UpdateStorageEvent } from "./messages";
 
-import {
-	PlaceItemsEvent as AddItemsEvent,
-	RetrieveItemsRequest as RemoveItemsRequest,
-	GetStorageRequest,
-	UpdateStorageEvent,
-	Item,
-	Entity,
-	PlaceEntitiesEvent as BroadcastEndpointsEvent,
-} from "./messages";
 
-type IpcEndpoints = [string, number, number, string][];
-type IpcItems = [string, number, number, string, number][];
+type IpcEndpoints = [ForceName, ChunkCoordinate, ChunkCoordinate, EntityName, number][];
+type IpcItems = [ForceName, ChunkCoordinate, ChunkCoordinate, ItemName, number][];
 
 export class InstancePlugin extends BaseInstancePlugin {
 	pendingTasks!: Set<any>;
@@ -24,23 +17,23 @@ export class InstancePlugin extends BaseInstancePlugin {
 
 	async init() {
 		this.pendingTasks = new Set();
-		this.instance.server.on("ipc-subspace_storage:broadcast_endpoints", (output: IpcEndpoints) => {
-			this.broadcastEndpoints(output).catch(err => this.unexpectedError(err));
+		this.instance.server.on("ipc-subspace_storage:place_endpoints", (output: IpcEndpoints) => {
+			this.placeEndpoints(output).catch(err => this.unexpectedError(err));
 		});
-		this.instance.server.on("ipc-subspace_storage:send_items", (items: IpcItems) => {
-			this.sendItems(items).catch(err => this.unexpectedError(err));
+		this.instance.server.on("ipc-subspace_storage:transfer_items", (items: IpcItems) => {
+			this.transferItems(items).catch(err => this.unexpectedError(err));
 		});
-		this.instance.server.on("ipc-subspace_storage:request_items", (items: IpcItems) => {
+		this.instance.server.on("ipc-subspace_storage:transfer_items", (items: IpcItems) => {
 			if (this.instance.status !== "running" || !this.host.connected) {
 				return;
 			}
 
-			let task = this.requestItems(items).catch(err => this.unexpectedError(err));
+			const task = this.transferItems(items).catch(err => this.unexpectedError(err));
 			this.pendingTasks.add(task);
 			task.finally(() => { this.pendingTasks.delete(task); });
 		});
 
-		this.instance.handle(BroadcastEndpointsEvent, this.handleBroadcastEndpointsEvent.bind(this));
+		this.instance.handle(UpdateEndpointsEvent, this.handleUpdateEndpointsEvent.bind(this));
 		this.instance.handle(UpdateStorageEvent, this.handleUpdateStorageEvent.bind(this));
 	}
 
@@ -50,12 +43,14 @@ export class InstancePlugin extends BaseInstancePlugin {
 				return; // Only ping if we are actually connected to the controller.
 			}
 			this.sendRcon(
-				"/sc __subspace_storage__ global.ticksSinceMasterPinged = 0", true
+				"/sc __subspace_storage__ global.heartbeat_tick = game.tick", true
 			).catch(err => this.unexpectedError(err));
 		}, 5000);
 
-		let items = await this.instance.sendTo("controller", new GetStorageRequest());
-		await this.sendRcon(`/sc __subspace_storage__ SetStorage("${lib.escapeString(JSON.stringify(items))}")`, true);
+		const storage = await this.instance.sendTo("controller", new GetStorageRequest());
+		await this.sendRcon(
+			`/sc __subspace_storage__ SetStorage("${lib.escapeString(JSON.stringify(storage))}")`, true
+		);
 	}
 
 	async onStop() {
@@ -67,61 +62,62 @@ export class InstancePlugin extends BaseInstancePlugin {
 		clearInterval(this.pingId);
 	}
 
-	async broadcastEndpoints(entities: IpcEndpoints) {
+	async placeEndpoints(endpoints: IpcEndpoints) {
 		if (!this.host.connector.hasSession) {
 			if (this.instance.config.get("subspace_storage.log_item_transfers")) {
-				this.logger.verbose("Ignored the following entities:");
-				this.logger.verbose(JSON.stringify(entities));
+				this.logger.verbose("Ignored the following endpoints:");
+				this.logger.verbose(JSON.stringify(endpoints));
 			}
 			return;
 		}
 
-		this.instance.sendTo("controller", new BroadcastEndpointsEvent(entities.map(item => new Entity(...item))));
+		this.instance.sendTo("controller", new UpdateEndpointsEvent(endpoints.map(endpoint => new Delta(...endpoint))));
 
 		if (this.instance.config.get("subspace_storage.log_item_transfers")) {
-			this.logger.verbose("Exported the following entities to controller:");
-			this.logger.verbose(JSON.stringify(entities));
+			this.logger.verbose("Registered the following endpoints on controller:");
+			this.logger.verbose(JSON.stringify(endpoints));
 		}
 	}
 
-	async sendItems(items: IpcItems) {
+	async transferItems(items: IpcItems) {
 		if (!this.host.connector.hasSession) {
 			if (this.instance.config.get("subspace_storage.log_item_transfers")) {
 				this.logger.verbose("Voided the following items:");
-				this.logger.verbose(JSON.stringify(items));
+				this.logger.verbose(JSON.stringify(items.filter(([, , , , count]) => count > 0)));
 			}
 			return;
 		}
 
-		this.instance.sendTo("controller", new AddItemsEvent(items.map(item => new Item(...item))));
+		const yields =
+			await this.instance.sendTo("controller", new TransferItemsRequest(items.map(item => new Delta(...item))));
 
 		if (this.instance.config.get("subspace_storage.log_item_transfers")) {
 			this.logger.verbose("Exported the following items to controller:");
-			this.logger.verbose(JSON.stringify(items));
+			this.logger.verbose(JSON.stringify(items.filter(([, , , , count]) => count > 0)));
 		}
-	}
 
-	async requestItems(requests: IpcItems) {
-		let items = await this.instance.sendTo("controller", new RemoveItemsRequest(requests.map(item => new Item(...item))));
-
-		if (!items.length) {
+		if (!yields.length) {
 			return;
 		}
 
 		if (this.instance.config.get("subspace_storage.log_item_transfers")) {
 			this.logger.verbose("Imported following items from controller:");
-			this.logger.verbose(JSON.stringify(items));
+			this.logger.verbose(JSON.stringify(yields));
 		}
 
-		await this.sendRcon(`/sc __subspace_storage__ ReceiveItems("${lib.escapeString(JSON.stringify(items))}")`, true);
+		await this.sendRcon(
+			`/sc __subspace_storage__ ReceiveTransfer("${lib.escapeString(JSON.stringify(yields))}")`, true
+		);
 	}
 
-	async handleBroadcastEndpointsEvent({ entities }: BroadcastEndpointsEvent) {
+	async handleUpdateEndpointsEvent({ endpoints }: UpdateEndpointsEvent) {
 		if (this.instance.status !== "running") {
 			return;
 		}
 
-		let task = this.sendRcon(`/sc __subspace_storage__ ReceiveEndpoints("${lib.escapeString(JSON.stringify(entities))}")`, true);
+		const task = this.sendRcon(
+			`/sc __subspace_storage__ UpdateEndpoints("${lib.escapeString(JSON.stringify(endpoints))}")`, true
+		);
 		this.pendingTasks.add(task);
 		await task.finally(() => { this.pendingTasks.delete(task); });
 	}
@@ -131,7 +127,9 @@ export class InstancePlugin extends BaseInstancePlugin {
 			return;
 		}
 
-		let task = this.sendRcon(`/sc __subspace_storage__ UpdateStorage("${lib.escapeString(JSON.stringify(items))}")`, true);
+		const task = this.sendRcon(
+			`/sc __subspace_storage__ UpdateStorage("${lib.escapeString(JSON.stringify(items))}")`, true
+		);
 		this.pendingTasks.add(task);
 		await task.finally(() => { this.pendingTasks.delete(task); });
 	}

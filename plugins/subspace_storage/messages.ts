@@ -1,12 +1,14 @@
-import { Type, Static } from "@sinclair/typebox";
 import * as lib from "@clusterio/lib";
+import { Static, Type } from "@sinclair/typebox";
+import { EntityName, ForceName, ItemName } from './data';
 
-export class Entity {
+export class Count<EntryName extends string> {
 	constructor(
-		public force: string,
-		public x: number,
-		public y: number,
-		public name: string,
+		public readonly force: ForceName,
+		public readonly cx: number,
+		public readonly cy: number,
+		public readonly name: EntryName,
+		public readonly count: number,
 	) {
 	}
 
@@ -15,62 +17,95 @@ export class Entity {
 		Type.Number(),
 		Type.Number(),
 		Type.String(),
+		Type.Number(),
 	]);
 
 	toJSON() {
-		return [this.force, this.x, this.y];
+		return [this.force, this.cx, this.cy, this.name, this.count];
 	}
 
-	static fromJSON(json: Static<typeof Entity.jsonSchema>): Entity {
-		return new this(...json);
+	static fromJSON<EntryName extends string>(json: Static<typeof Count.jsonSchema>): Count<EntryName> {
+		return new Count(...json) as Count<EntryName>;
 	}
 }
 
-export class PlaceEntitiesEvent {
-	declare ["constructor"]: typeof PlaceEntitiesEvent;
+export class Delta<EntryName extends string> extends Count<EntryName> {
+	static fromJSON<EntryName extends string>(json: Static<typeof Delta.jsonSchema>): Delta<EntryName> {
+		return new Count(...json) as Delta<EntryName>;
+	}
+}
+
+export class ManageSubscriptionRequest {
+	declare ["constructor"]: typeof ManageSubscriptionRequest;
+	static type = "request" as const;
+	static src = "control" as const;
+	static dst = "controller" as const;
+	static plugin = "subspace_storage" as const;
+	static permission = "subspace_storage.storage.view" as const;
+
+	constructor(
+		public subscribe: boolean
+	) {
+	}
+
+	static jsonSchema = Type.Object({
+		"subscribe": Type.Boolean(),
+	});
+
+	static fromJSON({ subscribe }: Static<typeof ManageSubscriptionRequest.jsonSchema>): ManageSubscriptionRequest {
+		return new this(subscribe);
+	}
+}
+
+export class GetEndpointsRequest {
+	declare ["constructor"]: typeof GetEndpointsRequest;
+	static type = "request" as const;
+	static src = ["instance", "control"] as const;
+	static dst = "controller" as const;
+	static plugin = "subspace_storage" as const;
+	static permission = "subspace_storage.storage.view" as const;
+	static Response = lib.jsonArray(Count<EntityName>);
+}
+
+export class PlaceEndpointsEvent {
+	declare ["constructor"]: typeof PlaceEndpointsEvent;
 	static type = "event" as const;
 	static src = "instance" as const;
 	static dst = "controller" as const;
 	static plugin = "subspace_storage" as const;
 
 	constructor(
-		public entities: Entity[]
+		public endpoints: Delta<EntityName>[]
 	) {
 	}
 
 	static jsonSchema = Type.Object({
-		"entities": Type.Array(Entity.jsonSchema),
+		"endpoints": Type.Array(Delta.jsonSchema),
 	});
 
-	static fromJSON(json: Static<typeof PlaceEntitiesEvent.jsonSchema>): PlaceEntitiesEvent {
-		return new this(json.entities.map(entity => Entity.fromJSON(entity)));
+	static fromJSON({ endpoints }: Static<typeof PlaceEndpointsEvent.jsonSchema>): PlaceEndpointsEvent {
+		return new this(endpoints.map(endpoint => Delta.fromJSON(endpoint)));
 	}
 }
 
-export class Item {
+export class UpdateEndpointsEvent {
+	declare ["constructor"]: typeof UpdateEndpointsEvent;
+	static type = "event" as const;
+	static src = "instance" as const;
+	static dst = "controller" as const;
+	static plugin = "subspace_storage" as const;
+
 	constructor(
-		public force: string,
-		public x: number,
-		public y: number,
-		public name: string,
-		public count: number
+		public endpoints: Delta<EntityName>[]
 	) {
 	}
 
-	static jsonSchema = Type.Tuple([
-		Type.String(),
-		Type.Number(),
-		Type.Number(),
-		Type.String(),
-		Type.Number(),
-	]);
+	static jsonSchema = Type.Object({
+		"endpoints": Type.Array(Delta.jsonSchema),
+	});
 
-	toJSON() {
-		return [this.force, this.x, this.y, this.count];
-	}
-
-	static fromJSON(json: Static<typeof Item.jsonSchema>): Item {
-		return new this(...json);
+	static fromJSON({ endpoints }: Static<typeof UpdateEndpointsEvent.jsonSchema>): UpdateEndpointsEvent {
+		return new this(endpoints.map(endpoint => Delta.fromJSON(endpoint)));
 	}
 }
 
@@ -81,73 +116,30 @@ export class GetStorageRequest {
 	static dst = "controller" as const;
 	static plugin = "subspace_storage" as const;
 	static permission = "subspace_storage.storage.view" as const;
-	static Response = lib.jsonArray(Item);
+	static Response = lib.jsonArray(Count<ItemName>);
 }
 
-export class PlaceItemsEvent {
-	declare ["constructor"]: typeof PlaceItemsEvent;
-	static type = "event" as const;
-	static src = "instance" as const;
-	static dst = "controller" as const;
-	static plugin = "subspace_storage" as const;
-
-	constructor(
-		public items: Item[]
-	) {
-	}
-
-	static jsonSchema = Type.Object({
-		"items": Type.Array(Item.jsonSchema),
-	});
-
-	static fromJSON(json: Static<typeof PlaceItemsEvent.jsonSchema>): PlaceItemsEvent {
-		return new this(json.items.map(item => Item.fromJSON(item)));
-	}
-}
-
-export class RetrieveItemsRequest {
-	declare ["constructor"]: typeof RetrieveItemsRequest;
+export class TransferItemsRequest {
+	declare ["constructor"]: typeof TransferItemsRequest;
 	static type = "request" as const;
 	static src = "instance" as const;
 	static dst = "controller" as const;
 	static plugin = "subspace_storage" as const;
 
 	constructor(
-		public items: Item[]
+		public items: Delta<ItemName>[]
 	) {
 	}
 
 	static jsonSchema = Type.Object({
-		"items": Type.Array(Item.jsonSchema),
+		"items": Type.Array(Delta.jsonSchema),
 	});
 
-	static fromJSON(json: Static<typeof RetrieveItemsRequest.jsonSchema>): RetrieveItemsRequest {
-		return new this(json.items.map(item => Item.fromJSON(item)));
+	static fromJSON({ items }: Static<typeof TransferItemsRequest.jsonSchema>): TransferItemsRequest {
+		return new this(items.map(item => Delta.fromJSON(item)));
 	}
 
-	static Response = lib.jsonArray(Item);
-}
-
-export class SubscribeOnStorageRequest {
-	declare ["constructor"]: typeof SubscribeOnStorageRequest;
-	static type = "request" as const;
-	static src = "control" as const;
-	static dst = "controller" as const;
-	static plugin = "subspace_storage" as const;
-	static permission = "subspace_storage.storage.view" as const;
-
-	constructor(
-		public storage: boolean
-	) {
-	}
-
-	static jsonSchema = Type.Object({
-		"storage": Type.Boolean(),
-	});
-
-	static fromJSON(json: Static<typeof SubscribeOnStorageRequest.jsonSchema>): SubscribeOnStorageRequest {
-		return new this(json.storage);
-	}
+	static Response = lib.jsonArray(Delta<ItemName>);
 }
 
 export class UpdateStorageEvent {
@@ -158,15 +150,15 @@ export class UpdateStorageEvent {
 	static plugin = "subspace_storage" as const;
 
 	constructor(
-		public items: Item[]
+		public items: Count<ItemName>[]
 	) {
 	}
 
 	static jsonSchema = Type.Object({
-		"items": Type.Array(Item.jsonSchema),
+		"items": Type.Array(Count.jsonSchema),
 	});
 
-	static fromJSON(json: Static<typeof UpdateStorageEvent.jsonSchema>): UpdateStorageEvent {
-		return new this(json.items.map(item => Item.fromJSON(item)));
+	static fromJSON({ items }: Static<typeof UpdateStorageEvent.jsonSchema>): UpdateStorageEvent {
+		return new this(items.map(item => Count.fromJSON(item)));
 	}
 }

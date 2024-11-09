@@ -67,15 +67,15 @@ export class NeuralDole {
 		this.storageLastTick = new StorageMap(this.storage);
 	}
 
-	divider(object: { force: string, x: number, y: number, name: string, count: number, instanceId: number, instanceName: string }): number {
+	divider(object: { force: string, cx: number, cy: number, name: string, count: number, instanceId: number, instanceName: string }): number {
 		let magicData = doleNN.dose(
 			object.count, // numReq
-			this.storage.get(object.force, object.x, object.y, object.name),
-			this.storageLastTick.get(object.force, object.x, object.y, object.name) || 0,
+			this.storage.get(object.force, object.cx, object.cy, object.name),
+			this.storageLastTick.get(object.force, object.cx, object.cy, object.name) || 0,
 			this.dole[object.name],
 			this.carry[`${object.name} ${object.instanceId}`] || 0,
 			this.lastRequest[`${object.name}_${object.instanceId}_${object.instanceName}`] || 0,
-			this.getRequestStats(object.force, object.x, object.y, object.name, 5),
+			this.getRequestStats(object.force, object.cx, object.cy, object.name, 5),
 			this.debt[`${object.name} ${object.instanceId}`] || 0
 		);
 		if ((this.stats[object.name] || []).length > 0) {
@@ -91,7 +91,7 @@ export class NeuralDole {
 		this.debt[`${object.name} ${object.instanceId}`] = magicData[3];
 
 		// Remove item from DB and send it
-		this.storage.update(object.force, object.x, object.y, object.name, c => c - magicData[0]);
+		this.storage.update(object.force, object.cx, object.cy, object.name, c => c - magicData[0]);
 
 		return magicData[0];
 	}
@@ -107,13 +107,13 @@ export function doleDivider(
 		logItemTransfers,
 		logger,
 	}: {
-		object: { force: string, x: number, y: number, name: string, count: number, instanceId: number, instanceName: string },
+		object: { force: string, cx: number, cy: number, name: string, count: number, instanceId: number, instanceName: string },
 		items: StorageMap,
 		logItemTransfers: boolean,
 		logger: lib.Logger,
 	},
 ) {
-	let itemCount = items.get(object.force, object.x, object.y, object.name) || 0;
+	let itemCount = items.get(object.force, object.cx, object.cy, object.name) || 0;
 	// lower rates will equal more dramatic swings
 	const doleDivisionRetardation = 10;
 	// a higher cap will divide the store more ways, but will take longer to
@@ -136,7 +136,7 @@ export function doleDivider(
 	if (itemCount > object.count) {
 		// If successful, increase dole
 		_doleDivisionFactor[object.name] = Math.max(_doleDivisionFactor[object.name] || 1, 1) - 1;
-		items.update(object.force, object.x, object.y, object.name, c => c - object.count);
+		items.update(object.force, object.cx, object.cy, object.name, c => c - object.count);
 
 		prometheusDoleFactorGauge.labels(object.name).set(_doleDivisionFactor[object.name] || 0);
 		return object.count;
