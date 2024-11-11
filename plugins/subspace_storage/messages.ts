@@ -1,12 +1,12 @@
 import * as lib from "@clusterio/lib";
 import { Static, Type } from "@sinclair/typebox";
-import { EntityName, ForceName, ItemName } from './data';
+import { ChunkCoordinate, EntityName, ForceName, ItemName } from "./model";
 
 export class Count<EntryName extends string> {
 	constructor(
 		public readonly force: ForceName,
-		public readonly cx: number,
-		public readonly cy: number,
+		public readonly cx: ChunkCoordinate,
+		public readonly cy: ChunkCoordinate,
 		public readonly name: EntryName,
 		public readonly count: number,
 	) {

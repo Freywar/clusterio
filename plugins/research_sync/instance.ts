@@ -1,11 +1,11 @@
-import * as lib from "@clusterio/lib";
 import { BaseInstancePlugin } from "@clusterio/host";
+import * as lib from "@clusterio/lib";
 import {
-	ContributionEvent,
-	ProgressEvent,
+	AdvanceTechEvent,
 	FinishedEvent,
+	SyncTechsRequest,
 	TechnologySync,
-	SyncTechnologiesRequest,
+	UpdateTechsEvent,
 } from "./messages";
 
 // ./module/sync.lua
@@ -33,7 +33,7 @@ export class InstancePlugin extends BaseInstancePlugin {
 			throw new Error("research_sync plugin requires save patching.");
 		}
 
-		this.instance.server.on("ipc-research_sync:contribution", (tech: IpcContribution) => {
+		this.instance.server.on("ipc-research_sync:send_advancement", (tech: IpcContribution) => {
 			this.researchContribution(tech).catch(err => this.unexpectedError(err));
 		});
 		this.instance.server.on("ipc-research_sync:finished", (tech: IpcFinished) => {
@@ -41,19 +41,19 @@ export class InstancePlugin extends BaseInstancePlugin {
 		});
 
 		this.syncStarted = false;
-		this.instance.handle(ProgressEvent, this.handleProgressEvent.bind(this));
+		this.instance.handle(UpdateTechsEvent, this.handleProgressEvent.bind(this));
 		this.instance.handle(FinishedEvent, this.handleFinishedEvent.bind(this));
 	}
 
 	async researchContribution({ force, name, level, contribution }: IpcContribution) {
-		this.instance.sendTo("controller", new ContributionEvent(force, name, level, contribution));
+		this.instance.sendTo("controller", new AdvanceTechEvent(force, name, level, contribution));
 	}
 
-	async handleProgressEvent(event: ProgressEvent) {
+	async handleProgressEvent(event: UpdateTechsEvent) {
 		if (!this.syncStarted || !["starting", "running"].includes(this.instance.status)) {
 			return;
 		}
-		let techsJson = lib.escapeString(JSON.stringify(event.technologies));
+		let techsJson = lib.escapeString(JSON.stringify(event.techs));
 		await this.sendOrderedRcon(`/sc research_sync.update_progress("${techsJson}")`, true);
 	}
 
@@ -72,7 +72,7 @@ export class InstancePlugin extends BaseInstancePlugin {
 	}
 
 	async onStart() {
-		let dumpJson = await this.sendOrderedRcon("/sc research_sync.dump_technologies()");
+		let dumpJson = await this.sendOrderedRcon("/sc research_sync.get_technologies()");
 		let techsToSend = [];
 		let instanceTechs = new Map();
 		for (let tech of JSON.parse(dumpJson)) {
@@ -86,11 +86,11 @@ export class InstancePlugin extends BaseInstancePlugin {
 			(instanceTechs.get(tech.force) ?? instanceTechs.set(tech.force, new Map()).get(tech.force))!.set(tech.name, tech);
 		}
 
-		let controllerTechs = await this.instance.sendTo("controller", new SyncTechnologiesRequest(techsToSend));
+		let controllerTechs = await this.instance.sendTo("controller", new SyncTechsRequest(techsToSend));
 		this.syncStarted = true;
 		let techsToSync = [];
 		for (let controllerTech of controllerTechs) {
-			let { force, name, level, progress, researched } = controllerTech;
+			let { force, name, full: level, partial: progress, researched } = controllerTech;
 			let instanceTech = instanceTechs.get(force)?.get(name);
 			if (
 				!instanceTech

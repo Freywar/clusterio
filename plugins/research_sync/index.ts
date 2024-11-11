@@ -10,9 +10,9 @@ export const plugin: lib.PluginDeclaration = {
 	controllerEntrypoint: "dist/node/controller",
 
 	messages: [
-		messages.ContributionEvent,
-		messages.ProgressEvent,
+		messages.AdvanceTechEvent,
+		messages.UpdateTechsEvent,
 		messages.FinishedEvent,
-		messages.SyncTechnologiesRequest,
+		messages.SyncTechsRequest,
 	],
 };

@@ -9,11 +9,13 @@ const { Counter, Gauge } = lib;
 import * as dole from "./dole";
 import * as routes from "./routes";
 
-import { ChunkMap, EntityName, ItemName } from "./data";
 import {
-	Delta, GetStorageRequest, ManageSubscriptionRequest, PlaceEndpointsEvent, TransferItemsRequest,
-	UpdateEndpointsEvent, UpdateStorageEvent,
+	Delta, GetStorageRequest, ManageSubscriptionRequest, PlaceEndpointsEvent,
+	SetEndpointsEvent,
+	TransferItemsRequest,
+	UpdateStorageEvent,
 } from "./messages";
+import { ChunkMap, EntityName, ItemName } from "./model";
 
 const exportCounter = new Counter(
 	"clusterio_subspace_storage_export_total",
@@ -74,7 +76,7 @@ export class ControllerPlugin extends BaseControllerPlugin {
 	}
 
 	private async save() {
-		const endpointPath = path.resolve(this.controller.config.get("controller.database_directory"), "storage.json");
+		const endpointPath = path.resolve(this.controller.config.get("controller.database_directory"), "endpoints.json");
 		this.logger.verbose(`Writing endpoints to ${endpointPath}`);
 		await lib.safeOutputFile(endpointPath, JSON.stringify(this.endpoints.serialize()));
 
@@ -122,7 +124,7 @@ export class ControllerPlugin extends BaseControllerPlugin {
 	broadcast() {
 		if (this.endpoints.size) {
 			// TODO Only send the diff.
-			const event = UpdateEndpointsEvent.fromJSON({ endpoints: [...this.endpoints] });
+			const event = SetEndpointsEvent.fromJSON({ endpoints: [...this.endpoints] });
 			this.controller.sendTo("allInstances", event);
 			for (const subscriber of this.subscribers) {
 				subscriber.send(event);
@@ -154,7 +156,7 @@ export class ControllerPlugin extends BaseControllerPlugin {
 		return [...this.endpoints];
 	}
 
-	async handlePlaceEndpointsEvent({ endpoints }: UpdateEndpointsEvent, { id: instanceId }: lib.Address) {
+	async handlePlaceEndpointsEvent({ endpoints }: SetEndpointsEvent, { id: instanceId }: lib.Address) {
 		for (const { force, cx, cy, name, count } of endpoints) {
 			this.endpoints.update(force, cx, cy, name, c => c + count);
 		}
@@ -267,8 +269,8 @@ export class ControllerPlugin extends BaseControllerPlugin {
 	}
 
 	async onMetrics() {
-		for (const [force, x, y, name, count] of this.storage) {
-			controllerInventoryGauge.labels(force, `${x}`, `${y}`, name).set(count);
+		for (const [force, cx, cy, name, count] of this.storage) {
+			controllerInventoryGauge.labels(force, `${cx}`, `${cy}`, name).set(count);
 		}
 	}
 

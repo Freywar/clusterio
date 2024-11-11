@@ -1,11 +1,15 @@
 import { BaseInstancePlugin } from "@clusterio/host";
 import * as lib from "@clusterio/lib";
-import { ChunkCoordinate, EntityName, ForceName, ItemName } from "./data";
-import { Delta, GetStorageRequest, TransferItemsRequest, UpdateEndpointsEvent, UpdateStorageEvent } from "./messages";
+import {
+	Delta, GetEndpointsRequest, GetStorageRequest,
+	SetEndpointsEvent,
+	TransferItemsRequest,
+	UpdateStorageEvent,
+} from "./messages";
+import { EntityName, Entry, ItemName } from "./model";
 
-
-type IpcEndpoints = [ForceName, ChunkCoordinate, ChunkCoordinate, EntityName, number][];
-type IpcItems = [ForceName, ChunkCoordinate, ChunkCoordinate, ItemName, number][];
+type IpcEndpoints = Entry<EntityName>[];
+type IpcItems = Entry<ItemName>[];
 
 export class InstancePlugin extends BaseInstancePlugin {
 	pendingTasks!: Set<any>;
@@ -17,13 +21,10 @@ export class InstancePlugin extends BaseInstancePlugin {
 
 	async init() {
 		this.pendingTasks = new Set();
-		this.instance.server.on("ipc-subspace_storage:place_endpoints", (output: IpcEndpoints) => {
-			this.placeEndpoints(output).catch(err => this.unexpectedError(err));
+		this.instance.server.on("ipc-subspace_storage:endpoints", (endpoints: IpcEndpoints) => {
+			this.placeEndpoints(endpoints).catch(err => this.unexpectedError(err));
 		});
-		this.instance.server.on("ipc-subspace_storage:transfer_items", (items: IpcItems) => {
-			this.transferItems(items).catch(err => this.unexpectedError(err));
-		});
-		this.instance.server.on("ipc-subspace_storage:transfer_items", (items: IpcItems) => {
+		this.instance.server.on("ipc-subspace_storage:items", (items: IpcItems) => {
 			if (this.instance.status !== "running" || !this.host.connected) {
 				return;
 			}
@@ -33,7 +34,7 @@ export class InstancePlugin extends BaseInstancePlugin {
 			task.finally(() => { this.pendingTasks.delete(task); });
 		});
 
-		this.instance.handle(UpdateEndpointsEvent, this.handleUpdateEndpointsEvent.bind(this));
+		this.instance.handle(SetEndpointsEvent, this.handleUpdateEndpointsEvent.bind(this));
 		this.instance.handle(UpdateStorageEvent, this.handleUpdateStorageEvent.bind(this));
 	}
 
@@ -46,6 +47,11 @@ export class InstancePlugin extends BaseInstancePlugin {
 				"/sc __subspace_storage__ global.heartbeat_tick = game.tick", true
 			).catch(err => this.unexpectedError(err));
 		}, 5000);
+
+		const endpoints = await this.instance.sendTo("controller", new GetEndpointsRequest());
+		await this.sendRcon(
+			`/sc __subspace_storage__ SetEndpoints("${lib.escapeString(JSON.stringify(endpoints))}")`, true
+		);
 
 		const storage = await this.instance.sendTo("controller", new GetStorageRequest());
 		await this.sendRcon(
@@ -71,7 +77,7 @@ export class InstancePlugin extends BaseInstancePlugin {
 			return;
 		}
 
-		this.instance.sendTo("controller", new UpdateEndpointsEvent(endpoints.map(endpoint => new Delta(...endpoint))));
+		this.instance.sendTo("controller", new SetEndpointsEvent(endpoints.map(endpoint => new Delta(...endpoint))));
 
 		if (this.instance.config.get("subspace_storage.log_item_transfers")) {
 			this.logger.verbose("Registered the following endpoints on controller:");
@@ -110,7 +116,7 @@ export class InstancePlugin extends BaseInstancePlugin {
 		);
 	}
 
-	async handleUpdateEndpointsEvent({ endpoints }: UpdateEndpointsEvent) {
+	async handleUpdateEndpointsEvent({ endpoints }: SetEndpointsEvent) {
 		if (this.instance.status !== "running") {
 			return;
 		}

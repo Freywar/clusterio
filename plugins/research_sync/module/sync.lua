@@ -1,100 +1,178 @@
 local clusterio_api = require("modules/clusterio/api")
 
-local sync = {}
 
 
-local function get_technology_progress(tech)
-	if tech == tech.force.current_research then
+local TechMap = {}
+
+function TechMap:new(default)
+	local techmap = { ["__default__"] = default }
+	setmetatable(techmap, self)
+	self.__index = self
+	return techmap
+end
+
+function TechMap.parse(data, default)
+	local techmap = TechMap:new(default)
+	for _, item in ipairs(data) do
+		techmap:set(item[1], item[2], item[3])
+	end
+	return techmap
+end
+
+function TechMap:set(force, name, data)
+	self[force] = self[force] or {}
+	self[force][name] = data
+	if self[force][name] == self["__default__"] then
+		self[force][name] = nil
+	end
+	if not next(self[force]) then
+		self[force] = nil
+	end
+end
+
+function TechMap:get(force, name)
+	return self[force]
+			and self[force][name]
+			or self["__default__"]
+end
+
+function TechMap:update(force, name, f)
+	self:set(force, name, f(self:get(force, name)))
+end
+
+function TechMap:serialize()
+	local result = {}
+	for force, techs in pairs(self) do
+		for name, data in pairs(techs) do
+			table.insert(result, { force, name, data })
+		end
+	end
+	return result
+end
+
+function TechMap:entries()
+	local entries = self:serialize() -- TODO Avoid creating an array
+	local i = 0
+	return function()
+		i = i + 1
+		if i > #entries then
+			return nil, nil, nil
+		end
+		return entries[i][1], entries[i][2], entries[i][3]
+	end
+end
+
+local function get_progress(tech)
+	if tech.researched then
+		return 1
+	elseif tech == tech.force.current_research then
 		return tech.force.research_progress
 	else
 		return tech.force.get_saved_technology_progress(tech.name)
 	end
 end
 
-local function set_technology_progress(tech, progress)
-	if tech == tech.force.current_research then
+local function set_progress(tech, progress)
+	if progress>=1 then
+		
+	elseif tech == tech.force.current_research then
 		tech.force.research_progress = progress
 	else
 		tech.force.set_saved_technology_progress(tech.name, progress)
 	end
 end
 
-local function get_technology(forceName, techName)
-	return (global.research_sync.technologies[forceName] or {})[techName]
-end
 
-local function set_technology(forceName, techName, tech)
-	global.research_sync.technologies[forceName] = global.research_sync.technologies[forceName] or {}
-	global.research_sync.technologies[forceName][techName] = tech
-end
 
-sync.events = {}
-sync.events[clusterio_api.events.on_server_startup] = function(event)
-	if not global.research_sync then
-		global.research_sync = {
-			technologies = {},
-		}
-	end
 
-	-- Used when syncing completed technologies from the controller
-	global.research_sync.ignore_research_finished = false
-
-	for _, force in pairs(game.forces) do
-		for _, tech in pairs(force.technologies) do
-			local progress = get_technology_progress(tech)
-			set_technology(force.name, tech.name, {
-				level = tech.level,
-				researched = tech.researched,
-				progress = progress,
-			})
-		end
-	end
-end
-
-local function get_contribution(tech)
-	local progress = get_technology_progress(tech)
+local function get_advancement(tech)
+	local progress = get_progress(tech)
 	if not progress then
-		return 0, nil
+		return 0, progress
 	end
 
-	local prev_tech = get_technology(tech.force.name, tech.name)
-	if prev_tech.progress and prev_tech.level == tech.level then
+	local prev_tech = global.research_sync.techs:get(tech.force.name, tech.name)
+	if prev_tech.level == tech.level and prev_tech.progress then
 		return progress - prev_tech.progress, progress
 	else
 		return progress, progress
 	end
 end
 
-local function send_contribution(tech)
-	local contribution, progress = get_contribution(tech)
+local function send_advancement(curr_tech)
+	local progress = get_progress(curr_tech)
+	if (progress or 0) == 0 then
+		return
+	end
+
+	local advancement
+	local prev_tech = global.research_sync.techs:get(curr_tech.force.name, curr_tech.name)
+	if prev_tech.level == curr_tech.level and progress ~= prev_tech.progress then
+		if progress ~= prev_tech.progress then
+			clusterio_api.send_json("research_sync:advancement", {
+				force = curr_tech.force.name,
+				name = curr_tech.name,
+				level = curr_tech.level,
+				advancement = progress - (prev_tech.progress or 0),
+			})
+			global.research_sync.techs:get(curr_tech.force.name, curr_tech.name).progress = progress
+		end
+	else
+		clusterio_api.send_json("research_sync:advancement", {
+			force = curr_tech.force.name,
+			name = curr_tech.name,
+			level = curr_tech.level,
+			advancement = progress,
+		})
+	end
+end
+
+
+local research_sync = {
+	events = {},
+	on_nth_tick = {}
+}
+
+research_sync.events[clusterio_api.events.on_server_startup] = function()
+	global.research_sync = global.research_sync or { technologies = {} }
+	global.research_sync.locked = false -- Techs are being handled by the plugin, no event should be handled.
+
+	local force = game.forces["player"]
+	for _, tech in pairs(force.technologies) do
+		global.research_sync.techs[tech.name] = {
+			level = tech.level,
+			researched = tech.researched,
+			progress = get_progress(tech),
+		}
+	end
+end
+
+research_sync.events[defines.events.on_research_started] = function(event)
+	if global.research_sync.locked or not event.last_research then
+		return
+	end
+
+	local contribution, progress = get_advancement(event.last_research)
 	if contribution ~= 0 then
 		clusterio_api.send_json("research_sync:contribution", {
-			force = tech.force.name,
-			name = tech.name,
-			level = tech.level,
+			name = event.last_research.name,
+			level = event.last_research.level,
 			contribution = contribution,
 		})
-		get_technology(tech.force.name, tech.name).progress = progress
+		global.research_sync.techs[event.last_research.name].progress = progress
 	end
 end
 
-sync.events[defines.events.on_research_started] = function(event)
-	local tech = event.last_research
-	if tech then
-		send_contribution(tech)
-	end
-end
-
-sync.events[defines.events.on_research_finished] = function(event)
-	if global.research_sync.ignore_research_finished then
+research_sync.events[defines.events.on_research_finished] = function(event)
+	if global.research_sync.locked then
 		return
 	end
 
 	local tech = event.research
-	set_technology(tech.force.name, tech.name, {
+	global.research_sync.techs[tech.name] = {
 		level = tech.level,
 		researched = tech.researched,
-	})
+	}
 
 	local level = tech.level
 	if not tech.researched then
@@ -102,32 +180,26 @@ sync.events[defines.events.on_research_finished] = function(event)
 	end
 
 	clusterio_api.send_json("research_sync:finished", {
-		force = tech.force.name,
 		name = tech.name,
 		level = level,
 	})
 end
 
-sync.on_nth_tick = {}
-sync.on_nth_tick[79] = function(event)
-	for _, force in pairs(game.forces) do
-		local tech = force.current_research
-		if tech then
-			send_contribution(tech)
-		end
+research_sync.on_nth_tick[79] = function()
+	local tech = game.forces["player"].current_research
+	if tech then
+		send_advancement(tech)
 	end
 end
 
-research_sync = {}
-function research_sync.dump_technologies()
+function research_sync.get_technologies()
 	local techs = {}
-	for _, force in pairs(game.forces) do
+	for _, force in game.forces do
 		for _, tech in pairs(force.technologies) do
 			table.insert(techs, {
-				force = force.name,
 				name = tech.name,
-				level = tech.level,
-				progress = get_technology_progress(tech),
+				level = tech.level or 1,
+				progress = get_progress(tech),
 				researched = tech.researched,
 			})
 		end
@@ -140,16 +212,16 @@ function research_sync.dump_technologies()
 	end
 end
 
-function research_sync.sync_technologies(data)
-	local forceIndex = 1
-	local nameIndex = 2
-	local levelIndex = 3
-	local progressIndex = 4
-	local researchedIndex = 5
+function research_sync.set_technologies(data)
+	local force = game.forces["player"]
 
-	global.research_sync.ignore_research_finished = true
+	local nameIndex = 1
+	local levelIndex = 2
+	local progressIndex = 3
+	local researchedIndex = 4
+
+	global.research_sync.locked = true
 	for _, tech_data in pairs(game.json_to_table(data)) do
-		local force = game.forces[tech_data[forceIndex]]
 		local tech = force.technologies[tech_data[nameIndex]]
 		if tech and tech.level <= tech_data[levelIndex] then
 			local new_level = math.min(tech_data[levelIndex], tech.prototype.max_level)
@@ -170,41 +242,43 @@ function research_sync.sync_technologies(data)
 				tech.researched = true
 				progress = nil
 			elseif tech_data[progressIndex] then
-				send_contribution(tech)
+				send_advancement(tech)
 				progress = tech_data[progressIndex]
-				set_technology_progress(tech, progress)
+				set_progress(tech, progress)
 			else
-				progress = get_technology_progress(tech)
+				progress = get_progress(tech)
 			end
 
-			set_technology(force.name, tech.name, {
+			global.research_sync.techs[tech.name] = {
 				level = tech.level,
 				researched = tech.researched,
 				progress = progress,
-			})
+			}
 		end
 	end
-	global.research_sync.ignore_research_finished = false
+	global.research_sync.locked = false
 end
 
 function research_sync.update_progress(data)
-	for _, row in ipairs(game.json_to_table(data)) do
-		local force = game.forces[row.force]
-		local tech = force.technologies[row.name]
-		if tech and tech.level == row.level then
-			send_contribution(tech)
-			set_technology_progress(tech, row.progress)
-			set_technology(force.name, tech.name, {
+	local techs = game.json_to_table(data)
+	local force = game.forces["player"]
+
+	for _, controllerTech in ipairs(techs) do
+		local tech = force.technologies[controllerTech.name]
+		if tech and tech.level == controllerTech.level then
+			send_advancement(tech)
+			set_progress(tech, controllerTech.progress)
+			global.research_sync.techs[tech.name] = {
 				level = tech.level,
-				progress = row.progress
-			})
+				progress = controllerTech.progress
+			}
 		end
 	end
 end
 
-function research_sync.research_technology(forceName, techName, level)
-	local force = game.forces[forceName]
-	local tech = force.technologies[techName]
+function research_sync.research_technology(name, level)
+	local force = game.forces["player"]
+	local tech = force.technologies[name]
 	if not tech or tech.level > level then
 		return
 	end
@@ -213,28 +287,26 @@ function research_sync.research_technology(forceName, techName, level)
 		level = tech.prototype.max_level
 	end
 
-	global.research_sync.ignore_research_finished = true
+	global.research_sync.locked = true
 	if tech == force.current_research and tech.level == level then
 		force.research_progress = 1
-
 	elseif tech.level < level or tech.level == level and not tech.researched then
 		tech.level = level
 		tech.researched = true
 
 		if tech.name:find("-%d+$") then
-			game.print {"", "Researched ", {"technology-name." .. tech.name:gsub("-%d+$", "")}, " ", level}
+			game.print { "", "Researched ", { "technology-name." .. tech.name:gsub("-%d+$", "") }, " ", level }
 		else
-			game.print {"", "Researched ", {"technology-name." .. tech.name}}
+			game.print { "", "Researched ", { "technology-name." .. tech.name } }
 		end
 		game.play_sound { path = "utility/research_completed" }
 	end
-	global.research_sync.ignore_research_finished = false
+	global.research_sync.locked = false
 
-	set_technology(force.name, tech.name, {
+	global.research_sync.techs[tech.name] = {
 		level = tech.level,
 		researched = tech.researched,
-	})
+	}
 end
 
-
-return sync
+return research_sync

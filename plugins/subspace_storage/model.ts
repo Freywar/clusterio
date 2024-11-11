@@ -4,14 +4,16 @@ export type ChunkCoordinate = number;
 export type EntityName = string;
 export type ItemName = string;
 
+export type Key<EntryName extends string> = [ForceName, ChunkCoordinate, ChunkCoordinate, EntryName];
+export type Entry<EntryName extends string> = [...Key<EntryName>, number];
+
 export class ChunkMap<EntryName extends string> {
 	private _entries: Map<ForceName, Map<ChunkCoordinate, Map<ChunkCoordinate, Map<EntryName, number>>>> = new Map();
-	private _shapshot: Map<ForceName, Map<ChunkCoordinate, Map<ChunkCoordinate, Map<EntryName, number>>>> = new Map();
 	private _dirty: boolean = false;
 
-	constructor(data?: [ForceName, ChunkCoordinate, ChunkCoordinate, EntryName, number][]) {
-		for (const [force, cx, cy, name, count] of data ?? []) {
-			this.set(force, cx, cy, name, count);
+	constructor(data?: Entry<EntryName>[]) {
+		for (const entry of data ?? []) {
+			this.set(...entry);
 		}
 	}
 
@@ -19,11 +21,11 @@ export class ChunkMap<EntryName extends string> {
 		return [...this];
 	}
 
-	get(force: ForceName, cx: ChunkCoordinate, cy: ChunkCoordinate, name: EntryName): number {
+	get(...[force, cx, cy, name]: Key<EntryName>): number {
 		return this._entries.get(force)?.get(cx)?.get(cy)?.get(name) ?? 0;
 	}
 
-	set(force: ForceName, cx: ChunkCoordinate, cy: ChunkCoordinate, name: EntryName, count: number) {
+	set(...[force, cx, cy, name, count]: Entry<EntryName>) {
 		if (!count) {
 			this.remove(force, cx, cy, name);
 		} else {
@@ -39,13 +41,13 @@ export class ChunkMap<EntryName extends string> {
 			this._entries.get(force)!.get(cx)!.get(cy)!.set(name, count);
 		}
 		this._dirty = true;
-	};
+	}
 
 	update(force: ForceName, cx: ChunkCoordinate, cy: ChunkCoordinate, name: EntryName, update: (c: number) => number) {
 		this.set(force, cx, cy, name, update(this.get(force, cx, cy, name)));
-	};
+	}
 
-	remove(force: ForceName, cx: ChunkCoordinate, cy: ChunkCoordinate, name: EntryName) {
+	remove(...[force, cx, cy, name]: Key<EntryName>) {
 		this._entries.get(force)?.get(cx)?.get(cy)?.delete(name);
 		if (!this._entries.get(force)?.get(cx)?.get(cy)?.size) {
 			this._entries.get(force)?.get(cx)?.delete(cy);
@@ -57,12 +59,12 @@ export class ChunkMap<EntryName extends string> {
 			this._entries.delete(force);
 		}
 		this._dirty = true;
-	};
+	}
 
 	clear() {
 		this._entries = new Map();
 		this._dirty = true;
-	};
+	}
 
 	get dirty(): boolean {
 		return this._dirty;
@@ -72,18 +74,17 @@ export class ChunkMap<EntryName extends string> {
 		return [...this].length;
 	}
 
-	* keys(): IterableIterator<[ForceName, ChunkCoordinate, ChunkCoordinate, EntryName]> {
+	* keys(): IterableIterator<Key<EntryName>> {
 		for (let [force, chunks] of this._entries) {
-			for (let [x, cols] of chunks) {
-				for (let [y, items] of cols) {
+			for (let [cx, cols] of chunks) {
+				for (let [cy, items] of cols) {
 					for (let [name] of items) {
-						yield [force, x, y, name];
+						yield [force, cx, cy, name];
 					}
 				}
 			}
 		}
 	}
-
 
 	* values(): IterableIterator<number> {
 		for (let chunks of this._entries.values()) {
@@ -97,12 +98,12 @@ export class ChunkMap<EntryName extends string> {
 		}
 	}
 
-	* entries(): IterableIterator<[ForceName, ChunkCoordinate, ChunkCoordinate, EntryName, number]> {
+	* entries(): IterableIterator<Entry<EntryName>> {
 		for (let [force, chunks] of this._entries) {
-			for (let [x, cols] of chunks) {
-				for (let [y, items] of cols) {
+			for (let [cx, cols] of chunks) {
+				for (let [cy, items] of cols) {
 					for (let [name, count] of items) {
-						yield [force, x, y, name, count];
+						yield [force, cx, cy, name, count];
 					}
 				}
 			}

@@ -50,7 +50,7 @@ export const plugin: lib.PluginDeclaration = {
 	},
 
 	messages: [
-		messages.UpdateEndpointsEvent,
+		messages.SetEndpointsEvent,
 		messages.GetStorageRequest,
 		messages.TransferItemsRequest,
 		messages.ManageSubscriptionRequest,

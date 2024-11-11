@@ -1,5 +1,5 @@
-import { StorageMap } from "./data";
 import * as doleNN from "./dole_nn_base";
+import { StorageMap } from "./model";
 
 import * as lib from "@clusterio/lib";
 const { Gauge } = lib;

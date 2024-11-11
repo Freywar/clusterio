@@ -6,7 +6,7 @@ import {
 } from "@clusterio/web_ui";
 import { Count, GetStorageRequest, ManageSubscriptionRequest, UpdateStorageEvent } from "../messages";
 
-import { ChunkMap, ItemName } from "../data";
+import { ChunkMap, Entry, ItemName } from "../model";
 import "./style.css";
 
 const { Paragraph } = Typography;
@@ -27,7 +27,7 @@ function useStorage(control: Control) {
 	return storage;
 }
 
-type ItemFilter = ([force, x, y, name, count]: [string, number, number, string, number]) => boolean;
+type ItemFilter = ([force, cx, cy, name, count]: Entry<ItemName>) => boolean;
 
 function StoragePage() {
 	const control = useContext(ControlContext);
@@ -36,7 +36,7 @@ function StoragePage() {
 	const storage = useStorage(control);
 	const [filter, setFilter] = useState<null | ItemFilter>(null);
 
-	function getLocaleName(name: string) {
+	function getLocaleName(name: ItemName) {
 		const meta = itemMetadata.get(name);
 		if (meta?.localised_name) {
 			// TODO: implement the locale to name conversion.
@@ -65,7 +65,8 @@ function StoragePage() {
 						return;
 					}
 					const filterExpr = new RegExp(search.replace(/(^| )(\w)/g, "$1\\b$2").replace(/ +/g, ".*"), "i");
-					setFilter(() => (([, , , name]: [string, number, number, string, number]) => filterExpr.test(name) || filterExpr.test(getLocaleName(name))));
+					setFilter(() => (([, , , name]: Entry<ItemName>) => filterExpr.test(name)
+						|| filterExpr.test(getLocaleName(name))));
 				}}
 			/>
 		</Paragraph>
@@ -91,7 +92,7 @@ function StoragePage() {
 						if (ay > by) { return 1; }
 						return 0;
 					},
-					render: (_, [, x, y]) => <>{x},{y}</>,
+					render: (_, [, cx, cy]) => <>{cx},{cy}</>,
 				},
 				{
 					title: "Resource",
