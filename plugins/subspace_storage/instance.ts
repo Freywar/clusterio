@@ -1,11 +1,13 @@
 import { BaseInstancePlugin } from "@clusterio/host";
 import * as lib from "@clusterio/lib";
-import { ChunkCoordinate, EntityName, ForceName, ItemName } from "./data";
-import { Delta, GetStorageRequest, TransferItemsRequest, UpdateEndpointsEvent, UpdateStorageEvent } from "./messages";
+import { EntityName, ItemName } from "./data";
+import {
+	Delta, GetEndpointsRequest, GetStorageRequest, TransferItemsRequest, UpdateEndpointsEvent, UpdateStorageEvent,
+} from "./messages";
 
 
-type IpcEndpoints = [ForceName, ChunkCoordinate, ChunkCoordinate, EntityName, number][];
-type IpcItems = [ForceName, ChunkCoordinate, ChunkCoordinate, ItemName, number][];
+type IpcEndpoints = ConstructorParameters<typeof Delta<EntityName>>[];
+type IpcItems = ConstructorParameters<typeof Delta<ItemName>>[];
 
 export class InstancePlugin extends BaseInstancePlugin {
 	pendingTasks!: Set<any>;
@@ -17,11 +19,8 @@ export class InstancePlugin extends BaseInstancePlugin {
 
 	async init() {
 		this.pendingTasks = new Set();
-		this.instance.server.on("ipc-subspace_storage:place_endpoints", (output: IpcEndpoints) => {
-			this.placeEndpoints(output).catch(err => this.unexpectedError(err));
-		});
-		this.instance.server.on("ipc-subspace_storage:transfer_items", (items: IpcItems) => {
-			this.transferItems(items).catch(err => this.unexpectedError(err));
+		this.instance.server.on("ipc-subspace_storage:place_endpoints", (endpoints: IpcEndpoints) => {
+			this.placeEndpoints(endpoints).catch(err => this.unexpectedError(err));
 		});
 		this.instance.server.on("ipc-subspace_storage:transfer_items", (items: IpcItems) => {
 			if (this.instance.status !== "running" || !this.host.connected) {
@@ -46,6 +45,11 @@ export class InstancePlugin extends BaseInstancePlugin {
 				"/sc __subspace_storage__ global.heartbeat_tick = game.tick", true
 			).catch(err => this.unexpectedError(err));
 		}, 5000);
+
+		const endpoints = await this.instance.sendTo("controller", new GetEndpointsRequest());
+		await this.sendRcon(
+			`/sc __subspace_storage__ SetEndpoints("${lib.escapeString(JSON.stringify(endpoints))}")`, true
+		);
 
 		const storage = await this.instance.sendTo("controller", new GetStorageRequest());
 		await this.sendRcon(

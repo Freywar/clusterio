@@ -1,6 +1,6 @@
 import * as lib from "@clusterio/lib";
 import { Static, Type } from "@sinclair/typebox";
-import { EntityName, ForceName, ItemName } from './data';
+import { EntityName, ForceName, ItemName } from "./data";
 
 export class Count<EntryName extends string> {
 	constructor(

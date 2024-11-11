@@ -6,10 +6,12 @@ import {
 } from "@clusterio/web_ui";
 import { Count, GetStorageRequest, ManageSubscriptionRequest, UpdateStorageEvent } from "../messages";
 
-import { ChunkMap, ItemName } from "../data";
+import { ChunkCoordinate, ChunkMap, ForceName, ItemName } from "../data";
 import "./style.css";
 
 const { Paragraph } = Typography;
+
+type Item = [ForceName, ChunkCoordinate, ChunkCoordinate, ItemName, number];
 
 function useStorage(control: Control) {
 	const plugin = control.plugins.get("subspace_storage") as WebPlugin;
@@ -27,7 +29,7 @@ function useStorage(control: Control) {
 	return storage;
 }
 
-type ItemFilter = ([force, x, y, name, count]: [string, number, number, string, number]) => boolean;
+type ItemFilter = ([force, x, y, name, count]: Item) => boolean;
 
 function StoragePage() {
 	const control = useContext(ControlContext);
@@ -36,7 +38,7 @@ function StoragePage() {
 	const storage = useStorage(control);
 	const [filter, setFilter] = useState<null | ItemFilter>(null);
 
-	function getLocaleName(name: string) {
+	function getLocaleName(name: ItemName) {
 		const meta = itemMetadata.get(name);
 		if (meta?.localised_name) {
 			// TODO: implement the locale to name conversion.
@@ -65,7 +67,8 @@ function StoragePage() {
 						return;
 					}
 					const filterExpr = new RegExp(search.replace(/(^| )(\w)/g, "$1\\b$2").replace(/ +/g, ".*"), "i");
-					setFilter(() => (([, , , name]: [string, number, number, string, number]) => filterExpr.test(name) || filterExpr.test(getLocaleName(name))));
+					setFilter(() => (([, , , name]: Item) => filterExpr.test(name)
+						|| filterExpr.test(getLocaleName(name))));
 				}}
 			/>
 		</Paragraph>
