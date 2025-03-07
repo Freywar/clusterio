@@ -1,172 +1,209 @@
-import { BaseControllerPlugin } from "@clusterio/controller";
 import fs from "fs-extra";
 import path from "path";
+import { BaseControllerPlugin } from "@clusterio/controller";
+import { Static } from "@sinclair/typebox";
 
 import * as lib from "@clusterio/lib";
 const { RateLimiter } = lib;
 
-import { AdvanceTechEvent, SyncTechsRequest, TechResearch, UpdateTechsEvent } from "./messages";
-import { TechMap } from "./model";
+import {
+	ContributionEvent,
+	ProgressEvent,
+	FinishedEvent,
+	TechnologySync,
+	SyncTechnologiesRequest,
+	TechnologyProgress,
+} from "./messages";
+
+type Technology = {
+	level: number,
+	progress: number | null,
+	researched: boolean,
+}
+
+
+async function loadTechnologies(
+	controllerConfig: lib.ControllerConfig,
+	logger: lib.Logger
+): Promise<Map<string, Technology>> {
+	let filePath = path.join(controllerConfig.get("controller.database_directory"), "technologies.json");
+	logger.verbose(`Loading ${filePath}`);
+	try {
+		return new Map(JSON.parse(await fs.readFile(filePath, "utf8")));
+	} catch (err: any) {
+		if (err.code === "ENOENT") {
+			logger.verbose("Creating new technologies database");
+			return new Map();
+		}
+		throw err;
+	}
+}
+
+async function saveTechnologies(
+	controllerConfig: lib.ControllerConfig,
+	technologies: Map<string, Technology>,
+	logger: lib.Logger
+) {
+	let filePath = path.join(controllerConfig.get("controller.database_directory"), "technologies.json");
+	logger.verbose(`writing ${filePath}`);
+	await lib.safeOutputFile(filePath, JSON.stringify([...technologies.entries()], null, "\t"));
+}
 
 export class ControllerPlugin extends BaseControllerPlugin {
-	techs!: TechMap;
-	changedTechs!: TechMap;
-	broadcaster!: lib.RateLimiter;
+	technologies!: Map<string, Technology>;
+	technologiesDirty = true;
+	progressRateLimiter!: lib.RateLimiter;
+	progressBroadcastId!: ReturnType<typeof setInterval> | null;
+	progressToBroadcast!: Set<string>;
 
-	private async load() {
-		const techsPath =
-			path.resolve(this.controller.config.get("controller.database_directory"), "techs.json");
-		this.logger.verbose(`Loading ${techsPath}`);
-		try {
-			this.techs = new TechMap(JSON.parse(await fs.readFile(techsPath, { encoding: "utf8" })));
-		} catch (err: any) {
-			if (err.code === "ENOENT") {
-				this.logger.verbose("Failed to load techs, resetting the database");
-				this.techs = new TechMap();
-			}
-			throw err;
+	async init() {
+		this.technologies = await loadTechnologies(this.controller.config, this.logger);
+		this.progressRateLimiter = new RateLimiter({
+			maxRate: 1,
+			action: () => this.broadcastProgress(),
+		});
+
+		this.progressBroadcastId = null;
+		this.progressToBroadcast = new Set();
+
+		this.controller.handle(ContributionEvent, this.handleContributionEvent.bind(this));
+		this.controller.handle(FinishedEvent, this.handleFinishedEvent.bind(this));
+		this.controller.handle(SyncTechnologiesRequest, this.handleSyncTechnologiesRequest.bind(this));
+	}
+
+	async onSaveData() {
+		if (this.technologiesDirty) {
+			this.technologiesDirty = false;
+			await saveTechnologies(this.controller.config, this.technologies, this.logger);
 		}
 	}
 
-	private async save() {
-		const techsPath = path.resolve(this.controller.config.get("controller.database_directory"), "techs.json");
-		this.logger.verbose(`Writing techs to ${techsPath}`);
-		await lib.safeOutputFile(techsPath, JSON.stringify(this.techs.serialize()));
+	async onShutdown() {
+		this.progressRateLimiter.cancel();
 	}
 
+	broadcastProgress() {
+		let techs = [];
+		for (let name of this.progressToBroadcast) {
+			let tech = this.technologies.get(name);
+			if (tech && tech.progress) {
+				techs.push(new TechnologyProgress(name, tech.level, tech.progress));
+			}
+		}
+		this.progressToBroadcast.clear();
 
-	async init() {
-		this.techs = new TechMap();
-
-		this.load();
-
-		this.broadcaster = new RateLimiter({
-			maxRate: 1,
-			action: () => this.broadcast(),
-		});
-
-		this.changedTechs = new TechMap();
-
-		this.controller.handle(SyncTechsRequest, this.handleSyncTechsRequest.bind(this));
-		this.controller.handle(AdvanceTechEvent, this.handleAdvanceTechEvent.bind(this));
-		this.controller.handle(FinishedEvent, this.handleFinishedEvent.bind(this));
+		if (techs.length) {
+			this.controller.sendTo("allInstances", new ProgressEvent(techs));
+		}
 	}
 
-	broadcast() {
-		if (!this.changedTechs.size) {
+	async handleContributionEvent(event: ContributionEvent) {
+		let { name, level, contribution } = event;
+		let tech = this.technologies.get(name);
+		if (!tech) {
+			tech = { level, progress: 0, researched: false };
+			this.technologies.set(name, tech);
+			this.technologiesDirty = true;
+
+		// Ignore contribution to already researched technologies
+		} else if (tech.level > level || tech.level === level && tech.researched) {
 			return;
 		}
 
-		this.controller.sendTo("allInstances", new UpdateTechsEvent([...this.changedTechs].map(tech => new TechResearch(...tech))));
-		this.changedTechs.clear();
+		// Handle contributon to the next level of a researched technology
+		if (tech.level === level - 1 && tech.researched) {
+			tech.researched = false;
+			tech.level = level;
+		}
+
+		// Ignore contributions to higher levels
+		if (tech.level < level) {
+			return;
+		}
+
+		let newProgress = tech.progress! + contribution;
+		if (newProgress < 1) {
+			tech.progress = newProgress;
+			this.progressToBroadcast.add(name);
+			this.progressRateLimiter!.activate();
+
+		} else {
+			tech.researched = true;
+			tech.progress = null;
+			this.progressToBroadcast.delete(name);
+
+			this.controller.sendTo("allInstances", new FinishedEvent(name, tech.level));
+		}
+		this.technologiesDirty = true;
 	}
 
-	async handleSyncTechsRequest(request: SyncTechsRequest): Promise<TechResearch[]> {
+	async handleFinishedEvent(event: FinishedEvent) {
+		let { name, level } = event;
+		let tech = this.technologies.get(name);
+		if (!tech || tech.level <= level) {
+			this.controller.sendTo("allInstances", event);
+			this.progressToBroadcast.delete(name);
+			this.technologies.set(name, { level, progress: null, researched: true });
+			this.technologiesDirty = true;
+		}
+	}
+
+	async handleSyncTechnologiesRequest(request: SyncTechnologiesRequest): Promise<TechnologySync[]> {
 		function baseLevel(name: string): number {
-			const match = /-(\d+)$/.exec(name);
+			let match = /-(\d+)$/.exec(name);
 			if (!match) {
 				return 1;
 			}
 			return Number.parseInt(match[1], 10);
 		}
 
-		for (const { force, name, level: remote } of request.techs) {
-			const local = this.techs.get(force, name);
-			if (!local) {
-				this.techs.set(force, name, remote);
-				this.changedTechs.set(force, name, remote);
+		for (let instanceTech of request.technologies) {
+			let { name, level, progress, researched } = instanceTech;
+			let tech = this.technologies.get(name);
+			if (!tech) {
+				this.technologies.set(name, { level, progress, researched });
+				this.technologiesDirty = true;
+				if (progress) {
+					this.progressToBroadcast.add(name);
+				} else if (researched || baseLevel(name) !== level) {
+					this.controller.sendTo("allInstances", new FinishedEvent(name, level));
+				}
+
 			} else {
-				if (local.absolute >= remote.absolute) {
+				if (tech.level > level || tech.level === level && tech.researched) {
 					continue;
 				}
 
-				if (local.full < remote.full || remote.partial >= 1) {
-					if (remote.full + Math.floor(remote.partial) > local.full + Math.floor(local.partial)) {
-						this.controller.sendTo("allInstances", new UpdateTechsEvent(
-							[new TechResearch(force, name, remote.full, 1)]));
+				if (tech.level < level || researched) {
+					// Send update if the unlocked level is greater
+					if (level - Number(!researched) > tech.level - Number(!tech.researched)) {
+						this.controller.sendTo("allInstances", new FinishedEvent(name, level - Number(!researched)));
 					}
-					local.full = full;
-					local.partial = partial;
+					tech.level = level;
+					tech.progress = progress;
+					tech.researched = researched;
 
-					this.techs.set(force, name, { full: full, partial: partial });
-					if (partial) {
-						this.changedTechs.set(force, name, this.techs.get(force, name));
+					if (progress) {
+						this.progressToBroadcast.add(name);
 					} else {
-						this.changedTechs.remove(force, name);
+						this.progressToBroadcast.delete(name);
 					}
-				} else if (local.partial && partial && local.partial < partial) {
-					local.partial = partial;
-					this.changedTechs.set(force, name, local);
+					this.technologiesDirty = true;
+
+				} else if (tech.progress && progress && tech.progress < progress) {
+					tech.progress = progress;
+					this.progressToBroadcast.add(name);
+					this.technologiesDirty = true;
 				}
-				this.techs.set(force, name, local);
 			}
 		}
-		this.broadcaster.activate();
+		this.progressRateLimiter.activate();
 
-		const technologies = [];
-		for (const [force, name, { full: level, partial: progress, researched }] of this.techs) {
-			technologies.push(new TechnologySync(force, name, level, progress, researched));
+		let technologies = [];
+		for (let [name, tech] of this.technologies) {
+			technologies.push(new TechnologySync(name, tech.level, tech.progress, tech.researched));
 		}
 
 		return technologies;
-	}
-
-
-	async handleAdvanceTechEvent(event: AdvanceTechEvent) {
-		const { force, name, level, contribution } = event;
-		const tech = this.techs.get(force, name);
-		if (!tech) {
-			tech = { full: level, partial: 0, researched: false };
-			this.techs.set(force, name, tech);
-
-			// Ignore contribution to already researched technologies
-		} else if (tech.full > level || tech.full === level && tech.researched) {
-			return;
-		}
-
-		// Handle contributon to the next level of a researched technology
-		if (tech.full === level - 1 && tech.researched) {
-			tech.researched = false;
-			tech.full = level;
-		}
-
-		// Ignore contributions to higher levels
-		if (tech.full < level) {
-			return;
-		}
-
-		const newProgress = tech.partial! + contribution;
-		if (newProgress < 1) {
-			tech.partial = newProgress;
-			this.changedTechs.set(force, name, {} as TechResearch);
-			this.broadcaster!.activate();
-
-		} else {
-			tech.researched = true;
-			tech.partial = null;
-			this.changedTechs.remove(force, name);
-
-			this.controller.sendTo("allInstances", new FinishedEvent(force, name, tech.full));
-		}
-		this.techs.set(force, name, tech);
-	}
-
-	async handleFinishedEvent(event: FinishedEvent) {
-		const { force, name, level } = event;
-		const tech = this.techs.get(force, name);
-		if (!tech || tech.full <= level) {
-			this.controller.sendTo("allInstances", event);
-			this.changedTechs.remove(force, name);
-			this.techs.set(force, name, { full: level, partial: null, researched: true });
-		}
-	}
-
-
-	async onSaveData() {
-		await this.save();
-	}
-
-	async onShutdown() {
-		this.broadcaster.cancel();
 	}
 }

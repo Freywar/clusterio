@@ -1,142 +1,129 @@
 import { BaseInstancePlugin } from "@clusterio/host";
 import * as lib from "@clusterio/lib";
-import {
-	Delta, GetEndpointsRequest, GetStorageRequest,
-	SetEndpointsEvent,
-	TransferItemsRequest,
-	UpdateStorageEvent,
-} from "./messages";
-import { EntityName, Entry, ItemName } from "./model";
 
-type IpcEndpoints = Entry<EntityName>[];
-type IpcItems = Entry<ItemName>[];
+import { Entry } from "./data";
+import {
+	ExtractItemsRequest,
+	InjectItemsEvent,
+	ItemPackage,
+	ReadItemsRequest,
+	WriteItemsEvent,
+} from "./messages";
+
+type IpcItems = Entry[];
 
 export class InstancePlugin extends BaseInstancePlugin {
-	pendingTasks!: Set<any>;
-	pingId?: ReturnType<typeof setTimeout>;
+	tasks: Set<Promise<unknown>> = new Set();
+	ping?: ReturnType<typeof setTimeout>;
 
-	unexpectedError(err: Error) {
+	private async track<T>(task: Promise<T>): Promise<T> {
+		this.tasks.add(task);
+		try {
+			return await task;
+		} finally {
+			this.tasks.delete(task);
+		}
+	}
+
+	private unexpectedError(err: Error) {
 		this.logger.error(`Unexpected error:\n${err.stack}`);
 	}
 
+	private async injectItems(items: IpcItems) {
+		if (!this.host.connector.hasSession) {
+			if (this.instance.config.get("subspace_storage.log_item_transfers")) {
+				this.logger.verbose("Voided the following items:");
+				this.logger.verbose(JSON.stringify(items));
+			}
+			return;
+		}
+
+		this.instance.sendTo("controller", new InjectItemsEvent(items.map(item => new ItemPackage(...item))));
+
+		if (this.instance.config.get("subspace_storage.log_item_transfers")) {
+			this.logger.verbose("Exported the following to controller:");
+			this.logger.verbose(JSON.stringify(items));
+		}
+	}
+
+	private async extractItems(items: IpcItems) {
+		const received = await this.instance.sendTo(
+			"controller",
+			new ExtractItemsRequest(items.map(item => new ItemPackage(...item)))
+		);
+
+		if (!received.length) {
+			return;
+		}
+
+		if (this.instance.config.get("subspace_storage.log_item_transfers")) {
+			this.logger.verbose("Imported the following from controller:");
+			this.logger.verbose(JSON.stringify(received));
+		}
+
+		await this.sendRcon(
+			`/sc __subspace_storage__ receive_items("${lib.escapeString(JSON.stringify(received))}")`,
+			true
+		);
+	}
+
+	private async handleWriteItemsEvent({ items }: WriteItemsEvent) {
+		if (this.instance.status !== "running") {
+			return;
+		}
+
+		await this.track(
+			this.sendRcon(
+				`/sc __subspace_storage__ update_inventory("${lib.escapeString(JSON.stringify(items))}")`,
+				true)
+		);
+	}
+
 	async init() {
-		this.pendingTasks = new Set();
-		this.instance.server.on("ipc-subspace_storage:endpoints", (endpoints: IpcEndpoints) => {
-			this.placeEndpoints(endpoints).catch(err => this.unexpectedError(err));
-		});
-		this.instance.server.on("ipc-subspace_storage:items", (items: IpcItems) => {
+		this.tasks = new Set();
+		this.instance.server.on("ipc-subspace_storage:inject", (items: IpcItems) => {
 			if (this.instance.status !== "running" || !this.host.connected) {
 				return;
 			}
-
-			const task = this.transferItems(items).catch(err => this.unexpectedError(err));
-			this.pendingTasks.add(task);
-			task.finally(() => { this.pendingTasks.delete(task); });
+			this.track(this.injectItems(items).catch(err => this.unexpectedError(err)));
+		});
+		this.instance.server.on("ipc-subspace_storage:extract", (orders: IpcItems) => {
+			if (this.instance.status !== "running" || !this.host.connected) {
+				return;
+			}
+			this.track(this.extractItems(orders).catch(err => this.unexpectedError(err)));
 		});
 
-		this.instance.handle(SetEndpointsEvent, this.handleUpdateEndpointsEvent.bind(this));
-		this.instance.handle(UpdateStorageEvent, this.handleUpdateStorageEvent.bind(this));
+		this.instance.handle(WriteItemsEvent, this.handleWriteItemsEvent.bind(this));
 	}
 
 	async onStart() {
-		this.pingId = setInterval(() => {
+		this.ping = setInterval(() => {
 			if (!this.host.connected) {
 				return; // Only ping if we are actually connected to the controller.
 			}
 			this.sendRcon(
-				"/sc __subspace_storage__ global.heartbeat_tick = game.tick", true
+				"/sc __subspace_storage__ global.ping_tick = game.tick", true
 			).catch(err => this.unexpectedError(err));
 		}, 5000);
 
-		const endpoints = await this.instance.sendTo("controller", new GetEndpointsRequest());
+		// TODO Diff with dump of invdata produce minimal command to sync
 		await this.sendRcon(
-			`/sc __subspace_storage__ SetEndpoints("${lib.escapeString(JSON.stringify(endpoints))}")`, true
-		);
-
-		const storage = await this.instance.sendTo("controller", new GetStorageRequest());
-		await this.sendRcon(
-			`/sc __subspace_storage__ SetStorage("${lib.escapeString(JSON.stringify(storage))}")`, true
+			`/sc __subspace_storage__ update_inventory("${lib.escapeString(JSON.stringify(
+				await this.instance.sendTo("controller", new ReadItemsRequest())
+			))}", true)`,
+			true
 		);
 	}
 
 	async onStop() {
-		clearInterval(this.pingId);
-		await Promise.all(this.pendingTasks);
+		clearInterval(this.ping);
+		await Promise.all(this.tasks);
 	}
 
 	onExit() {
-		clearInterval(this.pingId);
+		clearInterval(this.ping);
 	}
 
-	async placeEndpoints(endpoints: IpcEndpoints) {
-		if (!this.host.connector.hasSession) {
-			if (this.instance.config.get("subspace_storage.log_item_transfers")) {
-				this.logger.verbose("Ignored the following endpoints:");
-				this.logger.verbose(JSON.stringify(endpoints));
-			}
-			return;
-		}
 
-		this.instance.sendTo("controller", new SetEndpointsEvent(endpoints.map(endpoint => new Delta(...endpoint))));
-
-		if (this.instance.config.get("subspace_storage.log_item_transfers")) {
-			this.logger.verbose("Registered the following endpoints on controller:");
-			this.logger.verbose(JSON.stringify(endpoints));
-		}
-	}
-
-	async transferItems(items: IpcItems) {
-		if (!this.host.connector.hasSession) {
-			if (this.instance.config.get("subspace_storage.log_item_transfers")) {
-				this.logger.verbose("Voided the following items:");
-				this.logger.verbose(JSON.stringify(items.filter(([, , , , count]) => count > 0)));
-			}
-			return;
-		}
-
-		const yields =
-			await this.instance.sendTo("controller", new TransferItemsRequest(items.map(item => new Delta(...item))));
-
-		if (this.instance.config.get("subspace_storage.log_item_transfers")) {
-			this.logger.verbose("Exported the following items to controller:");
-			this.logger.verbose(JSON.stringify(items.filter(([, , , , count]) => count > 0)));
-		}
-
-		if (!yields.length) {
-			return;
-		}
-
-		if (this.instance.config.get("subspace_storage.log_item_transfers")) {
-			this.logger.verbose("Imported following items from controller:");
-			this.logger.verbose(JSON.stringify(yields));
-		}
-
-		await this.sendRcon(
-			`/sc __subspace_storage__ ReceiveTransfer("${lib.escapeString(JSON.stringify(yields))}")`, true
-		);
-	}
-
-	async handleUpdateEndpointsEvent({ endpoints }: SetEndpointsEvent) {
-		if (this.instance.status !== "running") {
-			return;
-		}
-
-		const task = this.sendRcon(
-			`/sc __subspace_storage__ UpdateEndpoints("${lib.escapeString(JSON.stringify(endpoints))}")`, true
-		);
-		this.pendingTasks.add(task);
-		await task.finally(() => { this.pendingTasks.delete(task); });
-	}
-
-	async handleUpdateStorageEvent({ items }: UpdateStorageEvent) {
-		if (this.instance.status !== "running") {
-			return;
-		}
-
-		const task = this.sendRcon(
-			`/sc __subspace_storage__ UpdateStorage("${lib.escapeString(JSON.stringify(items))}")`, true
-		);
-		this.pendingTasks.add(task);
-		await task.finally(() => { this.pendingTasks.delete(task); });
-	}
 }

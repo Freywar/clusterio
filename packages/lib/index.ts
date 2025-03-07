@@ -7,7 +7,6 @@ export * from "./src/api";
 export * from "./src/command";
 export * from "./src/config";
 export * from "./src/data";
-export * from "./src/database";
 export * from "./src/errors";
 export * from "./src/factorio";
 export * from "./src/file_ops";

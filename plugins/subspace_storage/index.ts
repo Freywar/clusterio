@@ -3,7 +3,6 @@ import * as messages from "./messages";
 
 declare module "@clusterio/lib" {
 	export interface ControllerConfigFields {
-		"subspace_storage.division_method": "simple" | "dole" | "neural_dole";
 		"subspace_storage.log_item_transfers": boolean;
 	}
 	export interface InstanceConfigFields {
@@ -34,13 +33,6 @@ export const plugin: lib.PluginDeclaration = {
 
 	controllerEntrypoint: "dist/node/controller",
 	controllerConfigFields: {
-		"subspace_storage.division_method": {
-			title: "Division Method",
-			description: "Method for dividing resource requests between instances.",
-			type: "string",
-			enum: ["simple", "dole", "neural_dole"],
-			initialValue: "simple",
-		},
 		"subspace_storage.log_item_transfers": {
 			title: "Log Item Transfers",
 			description: "Spam controller console with item transfers done.",
@@ -50,11 +42,11 @@ export const plugin: lib.PluginDeclaration = {
 	},
 
 	messages: [
-		messages.SetEndpointsEvent,
-		messages.GetStorageRequest,
-		messages.TransferItemsRequest,
-		messages.ManageSubscriptionRequest,
-		messages.UpdateStorageEvent,
+		messages.ReadItemsRequest,
+		messages.WriteItemsEvent,
+		messages.InjectItemsEvent,
+		messages.ExtractItemsRequest,
+		messages.UpdateStorageSubscriptionRequest,
 	],
 	webEntrypoint: "./web",
 	routes: ["/storage"],

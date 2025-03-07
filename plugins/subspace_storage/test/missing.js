@@ -4,5 +4,3 @@
 "use strict";
 require("../dist/node/instance");
 require("../dist/node/controller");
-require("../dist/node/dole");
-require("../dist/node/dole_nn_base");
