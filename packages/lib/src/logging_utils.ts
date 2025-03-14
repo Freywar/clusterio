@@ -151,10 +151,10 @@ export class TerminalFormat {
 		this.colorize = winston.format.colorize(options);
 	}
 
-	transform(info: any, options: { showTimestamp: boolean }) {
+	transform(info: any, options: unknown) {
 		info = this.colorize.transform(info, this.colorize.options);
 		let ts = "";
-		if (options.showTimestamp && info.timestamp) {
+		if ((options as { showTimestamp: boolean }).showTimestamp && info.timestamp) {
 			ts = `${info.timestamp.replace("T", " ")} `;
 		}
 

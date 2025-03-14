@@ -7,25 +7,21 @@ const common = require("@clusterio/web_ui/webpack.common");
 
 module.exports = (env = {}) => merge(common(env), {
 	context: __dirname,
-	entry: "./web/index.tsx",
+	entry: "./web/index.jsx",
 	output: {
 		path: path.resolve(__dirname, "dist", "web"),
 	},
 	plugins: [
 		new webpack.container.ModuleFederationPlugin({
-			name: "research_sync",
-			library: { type: "var", name: "plugin_research_sync" },
+			name: "server_select",
+			library: { type: "var", name: "plugin_server_select" },
 			exposes: {
-				"./": "./index.ts",
+				"./": "./info.js",
 				"./package.json": "./package.json",
-				"./web": "./web/index.tsx",
 			},
 			shared: {
 				"@clusterio/lib": { import: false },
 				"@clusterio/web_ui": { import: false },
-				"antd": { import: false },
-				"react": { import: false },
-				"react-dom": { import: false },
 			},
 		}),
 	],

@@ -76,6 +76,10 @@ export class InjectItemsEvent {
 		"items": Type.Array(ItemPackage.jsonSchema),
 	});
 
+	toJSON() {
+		return { items: this.items.map(item => item.toJSON()) };
+	}
+
 	static fromJSON({ items }: Static<typeof InjectItemsEvent.jsonSchema>): InjectItemsEvent {
 		return new this(items.map(item => ItemPackage.fromJSON(item)));
 	}
@@ -96,6 +100,10 @@ export class ExtractItemsRequest {
 	static jsonSchema = Type.Object({
 		"items": Type.Array(ItemPackage.jsonSchema),
 	});
+
+	toJSON() {
+		return { items: this.items.map(item => item.toJSON()) };
+	}
 
 	static fromJSON({ items }: Static<typeof ExtractItemsRequest.jsonSchema>): ExtractItemsRequest {
 		return new this(items.map(item => ItemPackage.fromJSON(item)));

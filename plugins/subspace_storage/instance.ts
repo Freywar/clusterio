@@ -31,10 +31,8 @@ export class InstancePlugin extends BaseInstancePlugin {
 
 	private async injectItems(items: IpcItems) {
 		if (!this.host.connector.hasSession) {
-			if (this.instance.config.get("subspace_storage.log_item_transfers")) {
-				this.logger.verbose("Voided the following items:");
-				this.logger.verbose(JSON.stringify(items));
-			}
+			this.logger.warn("Voided the following items:");
+			this.logger.warn(JSON.stringify(items));
 			return;
 		}
 
@@ -63,7 +61,7 @@ export class InstancePlugin extends BaseInstancePlugin {
 
 		await this.sendRcon(
 			`/sc __subspace_storage__ receive_items("${lib.escapeString(JSON.stringify(received))}")`,
-			true
+			true,
 		);
 	}
 
@@ -75,7 +73,8 @@ export class InstancePlugin extends BaseInstancePlugin {
 		await this.track(
 			this.sendRcon(
 				`/sc __subspace_storage__ update_inventory("${lib.escapeString(JSON.stringify(items))}")`,
-				true)
+				true,
+			)
 		);
 	}
 
@@ -112,7 +111,7 @@ export class InstancePlugin extends BaseInstancePlugin {
 			`/sc __subspace_storage__ update_inventory("${lib.escapeString(JSON.stringify(
 				await this.instance.sendTo("controller", new ReadItemsRequest())
 			))}", true)`,
-			true
+			true,
 		);
 	}
 

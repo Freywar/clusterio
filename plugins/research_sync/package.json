@@ -1,6 +1,6 @@
 {
 	"name": "@clusterio/plugin-research_sync",
-	"version": "2.0.0-alpha.18",
+	"version": "2.0.0-alpha.19",
 	"description": "Clusterio plugin for synchronizing research between Factorio servers",
 	"author": "Hornwitser <github@hornwitser.no>",
 	"homepage": "https://github.com/clusterio/clusterio#readme",
@@ -27,9 +27,13 @@
 	"devDependencies": {
 		"@clusterio/lib": "workspace:*",
 		"@clusterio/web_ui": "workspace:*",
+		"@types/express": "^4.17.17",
 		"@types/fs-extra": "^11.0.1",
 		"@types/node": "^20.4.5",
 		"@types/react": "^18.2.21",
+		"antd": "^5.13.0",
+		"react": "^18.2.0",
+		"react-dom": "^18.2.0",
 		"typescript": "^5.5.3",
 		"webpack": "^5.88.2",
 		"webpack-cli": "^5.1.4",
