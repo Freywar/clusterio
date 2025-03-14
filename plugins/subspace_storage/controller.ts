@@ -36,7 +36,7 @@ const controllerInventoryGauge = new Gauge(
 
 export class ControllerPlugin extends BaseControllerPlugin {
 	storage: ItemStorage = new ItemStorage();
-	snapshot: ItemStorage = new ItemStorage();
+	diff: ItemStorage = new ItemStorage();
 	broadcaster!: lib.RateLimiter;
 	subscribedControlLinks: Set<ControlConnection> = new Set();
 
@@ -49,10 +49,11 @@ export class ControllerPlugin extends BaseControllerPlugin {
 			if (err.code === "ENOENT") {
 				this.logger.verbose("Creating new storage");
 				this.storage = new ItemStorage();
+			} else {
+				throw err;
 			}
-			throw err;
 		}
-		this.snapshot = new ItemStorage(this.storage);
+		this.diff = new ItemStorage();
 		return this.storage;
 	}
 
@@ -63,23 +64,16 @@ export class ControllerPlugin extends BaseControllerPlugin {
 	}
 
 	private broadcast() {
-		const changes: ItemStorage = new ItemStorage();
-		for (const [force, cx, cy, item, count] of this.storage) {
-			if (this.snapshot.get(force, cx, cy, item) !== count) {
-				changes.set(force, cx, cy, item, count);
-			}
-		}
-
-		if (changes.empty) {
+		if (this.diff.empty) {
 			return;
 		}
 
-		const event = WriteItemsEvent.fromJSON({ items: [...changes.entries()] });
+		const event = WriteItemsEvent.fromJSON({ items: [...this.diff] });
 		this.controller.sendTo("allInstances", event);
 		for (const link of this.subscribedControlLinks) {
 			link.send(event);
 		}
-		this.snapshot = new ItemStorage(this.storage);
+		this.diff.clear();
 	}
 
 	private async handleReadItemsRequest() {
@@ -89,6 +83,7 @@ export class ControllerPlugin extends BaseControllerPlugin {
 	private async handleInjectItemsEvent({ items }: InjectItemsEvent, { id: instance }: lib.Address) {
 		for (const { force, cx, cy, item, count } of items) {
 			this.storage.update(force, cx, cy, item, c => c + count);
+			this.diff.set(force, cx, cy, item, this.storage.get(force, cx, cy, item));
 			exportCounter.labels(`${instance}`, force, `(${cx}, ${cy})`, item).inc(count);
 		}
 
@@ -107,6 +102,7 @@ export class ControllerPlugin extends BaseControllerPlugin {
 			const removable = Math.min(count, this.storage.get(force, cx, cy, item));
 			if (removable > 0) {
 				this.storage.update(force, cx, cy, item, c => c - removable);
+				this.diff.set(force, cx, cy, item, this.storage.get(force, cx, cy, item));
 				importCounter.labels(`${instance}`, force, `(${cx}, ${cy})`, item).inc(count);
 				actuals.push(new ItemPackage(force, cx, cy, item, removable));
 			}
@@ -178,8 +174,8 @@ export class ControllerPlugin extends BaseControllerPlugin {
 
 	async onSaveData() {
 		if (this.storage.dirty) {
-			await this.save();
 			this.storage.dirty = false;
+			await this.save();
 		}
 	}
 

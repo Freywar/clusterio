@@ -1,82 +1,62 @@
-import React, { useContext, useEffect, useState } from "react";
-import { Input, Table, Typography } from "antd";
+import { Input, Progress, Table, Typography } from "antd";
+import { useContext, useEffect, useState } from "react";
 
-import * as lib from "@clusterio/lib";
 import {
-	BaseWebPlugin, PageLayout, PageHeader, Control, ControlContext,
-	notifyErrorHandler, useItemMetadata, useLocale,
+	BaseWebPlugin,
+	Control, ControlContext,
+	notifyErrorHandler,
+	PageHeader,
+	PageLayout,
+	useLocale,
 } from "@clusterio/web_ui";
-import { GetStorageRequest, Item, SetStorageSubscriptionRequest, UpdateStorageEvent } from "../messages";
+import { TechDatabase } from "../data";
+import { ReadTechsRequest, Tech, UpdateDatabaseSubscriptionRequest, WriteTechsEvent } from "../messages";
 
 import "./style.css";
 
 const { Paragraph } = Typography;
 
-
-function useStorage(control: Control) {
-	let plugin = control.plugins.get("subspace_storage") as WebPlugin;
-	let [storage, setStorage] = useState([...plugin.storage]);
+function useDatabase(control: Control) {
+	const plugin = control.plugins.get("research_sync") as WebPlugin;
+	const [database, setDatabase] = useState([...plugin.database]);
 
 	useEffect(() => {
-		function update() {
-			setStorage([...plugin.storage]);
-		}
+		const update = () => setDatabase([...plugin.database]);
 
 		plugin.onUpdate(update);
-		return () => {
-			plugin.offUpdate(update);
-		};
+
+		return () => plugin.offUpdate(update);
 	}, []);
-	return storage;
+	return database;
 }
 
-function StoragePage() {
-	let control = useContext(ControlContext);
-	let locale = useLocale();
-	let itemMetadata = useItemMetadata();
-	let storage = useStorage(control);
-	type ItemFilter = ([name, count]: [string, number]) => boolean;
-	let [filter, setFilter] = useState<null | ItemFilter>(null);
+function TechsPage() {
+	const control = useContext(ControlContext);
+	const locale = useLocale();
+	const database = useDatabase(control);
+	type TechFilter = ([force, tech, level]: [string, string, number]) => boolean;
+	const [filter, setFilter] = useState<null | TechFilter>(null);
 
-	function getLocaleName(itemName: string) {
-		let localeName = itemName;
-		let meta = itemMetadata.get(itemName);
-		if (meta && meta.localised_name) {
-			// TODO: implement the locale to name conversion.
-			localeName = locale.get(meta.localised_name[0])!;
-		} else {
-			for (let section of ["item-name", "entity-name", "fluid-name", "equipment-name"]) {
-				let name = locale.get(`${section}.${itemName}`);
-				if (name) {
-					localeName = name;
-					break;
-				}
-			}
-		}
-
-		return localeName;
+	function getLocaleName(tech: string) {
+		return locale.get(`technology-name.${tech}`) || tech;
 	}
 
-	let numberFormat = new Intl.NumberFormat("en-US");
+	const numberFormat = new Intl.NumberFormat("en-US");
 
-	return <PageLayout nav={[{ name: "Storage" }]}>
-		<PageHeader title="Storage" />
+	return <PageLayout nav={[{ name: "Research" }]}>
+		<PageHeader title="Technologies" />
 		<Paragraph>
 			<Input
 				placeholder="Search"
 				onChange={(event) => {
-					let search = event.target.value.trim();
+					const search = event.target.value.trim();
 					if (!search) {
 						setFilter(null);
 						return;
 					}
-					search = search.replace(/(^| )(\w)/g, "$1\\b$2");
-					search = search.replace(/ +/g, ".*");
-					let filterExpr = new RegExp(search, "i");
-					setFilter(() => ((item: [string, number]) => {
-						let name = getLocaleName(item[0]);
-						return filterExpr.test(name) || filterExpr.test(item[0]);
-					}));
+					const re = new RegExp(search.replace(/(^| )(\w)/g, "$1\\b$2").replace(/ +/g, ".*"), "i");
+					setFilter(() => ([f, t]: [string, string, number]) => re.test(f)
+						|| re.test(t) || re.test(getLocaleName(t)));
 				}}
 			/>
 		</Paragraph>
@@ -85,67 +65,82 @@ function StoragePage() {
 				{
 					title: "Force",
 					key: "force",
-					sorter: (a, b) => {
-						let aName = getLocaleName(a[0].split(':')[0] ?? a[0]);
-						let bName = getLocaleName(b[0].split(':')[0] ?? b[0]);
-						if (aName < bName) { return -1; }
-						if (aName > bName) { return 1; }
-						return 0;
-					},
-					render: (_, item) => {
-						return <>{item[0].split(':')[0] ?? "player"}</>;
-					},
+					sorter: ([l], [r]) => "".localeCompare.call(l, r),
+					render: (_, [force]) => <>{force}</>,
 				},
 				{
-					title: "Resource",
-					key: "resource",
-					sorter: (a, b) => {
-						let aName = getLocaleName(a[0].split(':')[1] ?? a[0]);
-						let bName = getLocaleName(b[0].split(':')[1] ?? b[0]);
-						if (aName < bName) { return -1; }
-						if (aName > bName) { return 1; }
-						return 0;
-					},
-					render: (_, item) => {
-						let localeName = getLocaleName(item[0].split(':')[0] ?? item[0]);
-						let hasMeta = itemMetadata.get(item[0].split(':')[0] ?? item[0]);
-
-						return <>
-							<span className={`factorio-icon item-${hasMeta ? item[0] : "unknown-item"}`} />
-							{localeName}
-						</>;
-					},
+					title: "Technology",
+					key: "item",
+					sorter: ([, lt], [, rt]) => "".localeCompare.call(getLocaleName(lt), getLocaleName(rt)),
+					render: (_, [, tech]) => <>{getLocaleName(tech)}</>,
 				},
 				{
-					title: "Quantity",
-					key: "quantity",
+					title: "Level",
+					key: "level",
+					sorter: ([, , l], [, , r]) => Math.floor(l) - Math.floor(r),
+					render: (_, [, , level]) => numberFormat.format(Math.floor(level) + 1),
+				},
+				{
+					title: "Progress",
+					key: "progress",
 					align: "right",
-					defaultSortOrder: "descend",
-					sorter: (a, b) => a[1] - b[1],
-					render: (_, item) => numberFormat.format(item[1]),
+					sorter: ([, , l], [, , r]) => (l - Math.floor(l)) - (r - Math.floor(r)),
+					render: (_, [, , level]) => <Progress percent={(level - Math.floor(level)) * 100} />,
 				},
 			]}
-			dataSource={filter ? storage.filter(filter) : storage}
-			rowKey={item => item[0]}
+			dataSource={filter ? database.filter(filter) : database}
+			rowKey={([force, tech]) => `${force}/${tech}`}
 			pagination={false}
 		/>
 	</PageLayout>;
 }
 
 export class WebPlugin extends BaseWebPlugin {
-	storage = new Map<string, number>();
+	database: TechDatabase = new TechDatabase();
 	callbacks: (() => void)[] = [];
+
+	private rewrite(techs: Tech[]) {
+		for (const { force, tech, level } of techs) {
+			this.database.set(force, tech, level);
+		}
+		for (const callback of this.callbacks) {
+			callback();
+		}
+		console.log(this.database);
+	}
+
+	private async handleWriteTechsEvent(event: WriteTechsEvent) {
+		this.rewrite(event.techs);
+	}
+
+	private updateSubscription() {
+		if (!this.control.connector.connected) {
+			return;
+		}
+
+		this.control
+			.send(new UpdateDatabaseSubscriptionRequest(Boolean(this.callbacks.length)))
+			.catch(notifyErrorHandler("Error subscribing to database"));
+
+		if (this.callbacks.length) {
+			this.control!.send(new ReadTechsRequest())
+				.then(items => this.rewrite(items))
+				.catch(notifyErrorHandler("Error updating database"));
+		} else {
+			this.database.clear();
+		}
+	}
 
 	async init() {
 		this.pages = [
 			{
-				path: "/storage",
-				sidebarName: "Storage",
-				permission: "subspace_storage.storage.view",
-				content: <StoragePage />,
+				path: "/research",
+				sidebarName: "Research",
+				permission: "research_sync.technologies.view",
+				content: <TechsPage />,
 			},
 		];
-		this.control.handle(UpdateStorageEvent, this.handleUpdateStorageEvent.bind(this));
+		this.control.handle(WriteTechsEvent, this.handleWriteTechsEvent.bind(this));
 	}
 
 	onControllerConnectionEvent(event: "connect" | "drop" | "resume" | "close") {
@@ -154,19 +149,15 @@ export class WebPlugin extends BaseWebPlugin {
 		}
 	}
 
-	async handleUpdateStorageEvent(event: UpdateStorageEvent) {
-		this.updateStorage(event.items);
-	}
-
 	onUpdate(callback: () => void) {
 		this.callbacks.push(callback);
-		if (this.callbacks.length) {
+		if (this.callbacks.length === 1) {
 			this.updateSubscription();
 		}
 	}
 
 	offUpdate(callback: () => void) {
-		let index = this.callbacks.lastIndexOf(callback);
+		const index = this.callbacks.lastIndexOf(callback);
 		if (index === -1) {
 			throw new Error("callback is not registered");
 		}
@@ -174,35 +165,6 @@ export class WebPlugin extends BaseWebPlugin {
 		this.callbacks.splice(index, 1);
 		if (!this.callbacks.length) {
 			this.updateSubscription();
-		}
-	}
-
-	updateStorage(items: Item[]) {
-		for (let item of items) {
-			this.storage.set(item.name, item.count);
-		}
-		for (let callback of this.callbacks) {
-			callback();
-		}
-	}
-
-	updateSubscription() {
-		if (!this.control.connector.connected) {
-			return;
-		}
-
-		this.control.send(
-			new SetStorageSubscriptionRequest(Boolean(this.callbacks.length))
-		).catch(notifyErrorHandler("Error subscribing to storage"));
-
-		if (this.callbacks.length) {
-			this.control!.send(new GetStorageRequest()).then(
-				items => {
-					this.updateStorage(items);
-				}
-			).catch(notifyErrorHandler("Error  updating storage"));
-		} else {
-			this.storage.clear();
 		}
 	}
 }

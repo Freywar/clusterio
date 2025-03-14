@@ -1,12 +1,12 @@
 import * as lib from "@clusterio/lib";
 import { Static, Type } from "@sinclair/typebox";
-import { ForceName, TechLevel, TechName } from "./model";
+import { Entry, ForceName, TechLevel, TechName } from "./data";
 
-export class TechResearch {
+export class Tech {
 	constructor(
-		public readonly force: ForceName,
-		public readonly name: TechName,
-		public readonly level: TechLevel,
+		public force: ForceName,
+		public tech: TechName,
+		public level: TechLevel,
 	) {
 	}
 
@@ -16,21 +16,21 @@ export class TechResearch {
 		Type.Number(),
 	]);
 
-	toJSON() {
-		return [this.force, this.name, this.level.absolute];
+	toJSON(): Entry {
+		return [this.force, this.tech, this.level];
 	}
 
-	static fromJSON([force, name, level]: Static<typeof TechResearch.jsonSchema>): TechResearch {
-		return new TechResearch(force, name, new TechLevel(level));
+	static fromJSON(json: Static<typeof Tech.jsonSchema>): Tech {
+		return new this(...json);
 	}
 }
 
-export class TechAdvancement {
+export class TechProgress {
 	constructor(
-		public readonly force: ForceName,
-		public readonly name: TechName,
-		public readonly level: number,
-		public readonly advancement: number,
+		public force: ForceName,
+		public tech: TechName,
+		public base: TechLevel,
+		public delta: TechLevel,
 	) {
 	}
 
@@ -42,75 +42,112 @@ export class TechAdvancement {
 	]);
 
 	toJSON() {
-		return [this.force, this.name, this.level, this.advancement];
+		return [this.force, this.tech, this.base, this.delta];
 	}
 
-	static fromJSON(json: Static<typeof TechAdvancement.jsonSchema>): TechAdvancement {
-		return new TechAdvancement(...json);
+	static fromJSON(json: Static<typeof TechProgress.jsonSchema>): TechProgress {
+		return new this(...json);
 	}
 }
 
-export class SyncTechsRequest {
-	declare ["constructor"]: typeof SyncTechsRequest;
+export class ReadTechsRequest {
+	declare ["constructor"]: typeof ReadTechsRequest;
 	static type = "request" as const;
 	static src = ["instance", "control"] as const;
 	static dst = "controller" as const;
 	static plugin = "research_sync" as const;
-
-	constructor(
-		public techs: TechResearch[]
-	) {
-	}
-
-	static jsonSchema = Type.Object({
-		"techs": Type.Array(TechResearch.jsonSchema),
-	});
-
-	static fromJSON({ techs }: Static<typeof SyncTechsRequest.jsonSchema>): SyncTechsRequest {
-		return new this(techs.map(tech => TechResearch.fromJSON(tech)));
-	}
-
-	static Response = lib.jsonArray(TechResearch);
+	static permission = "research_sync.technologies.view" as const;
+	static Response = lib.jsonArray(Tech);
 }
 
-export class AdvanceTechEvent {
-	declare ["constructor"]: typeof AdvanceTechEvent;
-	static type = "event" as const;
-	static src = "instance" as const;
-	static dst = "controller" as const;
-	static plugin = "research_sync" as const;
-
-	constructor(
-		public techs: TechAdvancement[]
-	) {
-	}
-
-	static jsonSchema = Type.Object({
-		"techs": Type.Array(TechAdvancement.jsonSchema),
-	});
-
-	static fromJSON({ techs }: Static<typeof AdvanceTechEvent.jsonSchema>): AdvanceTechEvent {
-		return new this(techs.map(tech => TechAdvancement.fromJSON(tech)));
-	}
-}
-
-export class UpdateTechsEvent {
-	declare ["constructor"]: typeof UpdateTechsEvent;
+export class WriteTechsEvent {
+	declare ["constructor"]: typeof WriteTechsEvent;
 	static type = "event" as const;
 	static src = "controller" as const;
 	static dst = "instance" as const;
 	static plugin = "research_sync" as const;
 
 	constructor(
-		public techs: TechResearch[]
+		public techs: Tech[],
 	) {
 	}
 
 	static jsonSchema = Type.Object({
-		"techs": Type.Array(TechResearch.jsonSchema),
+		"techs": Type.Array(Tech.jsonSchema),
 	});
 
-	static fromJSON({ techs }: Static<typeof UpdateTechsEvent.jsonSchema>): UpdateTechsEvent {
-		return new this(techs.map(tech => TechResearch.fromJSON(tech)));
+	static fromJSON({ techs }: Static<typeof WriteTechsEvent.jsonSchema>): WriteTechsEvent {
+		return new this(techs.map(tech => Tech.fromJSON(tech)));
+	}
+}
+
+export class SyncTechsRequest {
+	declare ["constructor"]: typeof SyncTechsRequest;
+	static type = "request" as const;
+	static src = "instance" as const;
+	static dst = "controller" as const;
+	static plugin = "research_sync" as const;
+
+	constructor(
+		public techs: Tech[]
+	) {
+	}
+
+	static jsonSchema = Type.Object({
+		"techs": Type.Array(Tech.jsonSchema),
+	});
+
+	toJSON() {
+		return { techs: this.techs.map(tech => tech.toJSON()) };
+	}
+
+	static fromJSON({ techs }: Static<typeof SyncTechsRequest.jsonSchema>): SyncTechsRequest {
+		return new this(techs.map(tech => Tech.fromJSON(tech)));
+	}
+
+	static Response = lib.jsonArray(Tech);
+}
+
+export class ProgressTechsEvent {
+	declare ["constructor"]: typeof ProgressTechsEvent;
+	static type = "event" as const;
+	static src = "instance" as const;
+	static dst = "controller" as const;
+	static plugin = "research_sync" as const;
+
+	constructor(
+		public techs: TechProgress[]
+	) {
+	}
+
+	static jsonSchema = Type.Object({
+		"techs": Type.Array(TechProgress.jsonSchema),
+	});
+
+	static fromJSON({ techs }: Static<typeof ProgressTechsEvent.jsonSchema>): ProgressTechsEvent {
+		return new this(techs.map(tech => TechProgress.fromJSON(tech)));
+	}
+}
+
+export class UpdateDatabaseSubscriptionRequest {
+	declare ["constructor"]: typeof UpdateDatabaseSubscriptionRequest;
+	static type = "request" as const;
+	static src = "control" as const;
+	static dst = "controller" as const;
+	static plugin = "research_sync" as const;
+	static permission = "research_sync.technologies.view" as const;
+
+	constructor(
+		public subscribe: boolean
+	) {
+	}
+
+	static jsonSchema = Type.Object({
+		"subscribe": Type.Boolean(),
+	});
+
+	static fromJSON(
+		json: Static<typeof UpdateDatabaseSubscriptionRequest.jsonSchema>): UpdateDatabaseSubscriptionRequest {
+		return new this(json.subscribe);
 	}
 }
